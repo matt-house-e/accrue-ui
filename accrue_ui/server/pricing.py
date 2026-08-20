@@ -44,6 +44,10 @@ def price_usd(
     if not model:
         return None
     prices = PRICES.get(model)
+    if prices is None and "/" in model:
+        # OpenAI-compatible gateways (OpenRouter etc.) prefix ids with the
+        # vendor: "openai/gpt-5.2-mini" prices as "gpt-5.2-mini".
+        prices = PRICES.get(model.rsplit("/", 1)[-1])
     if prices is None:
         return None
     per_in, per_out = prices
