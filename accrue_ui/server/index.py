@@ -11,15 +11,17 @@ Cell state fits one byte: 0 pending, 1 running, 2 ok, 3 cached, 4 retrying,
 5 error, 6 skipped. The v1 log has no per-row start events, so "running" (1)
 cannot be inferred cheaply from step_start..row_complete bracketing — a step
 in progress with rows not yet completed leaves those cells pending (0), and
-state 1 is reserved for a future emitter. "retrying" (4) is likewise
-reserved: v1 emits exactly one terminal row_complete per cell *per segment*.
+state 1 is reserved for a future emitter.
 
 A ``retry_failed()`` segment appends a second ``row_complete`` for cells it
-re-executes (framed by ``retry_start`` / ``retry_end``, which this index
-ignores like any unknown record type). Re-delivery is therefore normal, not
-a fault: the new record replaces the cell's state, and the error groups heal
-with it — a cell that flips error -> ok leaves its group, and the group
-disappears once its last row does.
+re-executes, framed by ``retry_start`` / ``retry_end``. ``retry_start`` names
+those cells exactly, which is what makes state 4 (retrying) knowable: they
+are marked in flight there and leave every settled tally (step counters,
+error groups, ``rows.done``) until their own ``row_complete`` lands.
+Re-delivery is therefore normal, not a fault: the new record replaces the
+cell's state, and the error groups heal with it — a cell that flips
+error -> ok leaves its group, and the group disappears once its last row
+does.
 """
 
 from __future__ import annotations

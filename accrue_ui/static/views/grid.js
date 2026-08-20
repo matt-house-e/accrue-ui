@@ -69,8 +69,9 @@ function computeRows(arr, nsteps, filter, query) {
   return out;
 }
 
-// [start, count] windows covering only the rows in [first, last) that are
-// NOT already cached, each at most VALUES_PAGE_MAX indices wide. Rows the
+// [start, count] windows covering only the visible rows, first up to but
+// not including last, that are NOT already cached — each at most
+// VALUES_PAGE_MAX indices wide, which is what the server serves. Rows the
 // cache already holds are never re-requested, so one pass fills the window
 // and the next render has nothing left to ask for.
 function missingWindows(rows, first, last) {

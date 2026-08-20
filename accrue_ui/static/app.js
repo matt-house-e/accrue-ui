@@ -175,6 +175,9 @@ function StatTile({ label, tip, value, tone = "", bar = null }) {
   </div>`;
 }
 
+// Throughput and Time remaining only exist while something is still being
+// written: for a finished or abandoned run they would show stale arithmetic
+// over a rate that stopped, so they are dropped rather than frozen.
 function StatsStrip({ snap }) {
   const stats = snap.stats;
   const rows = snap.rows;
@@ -205,8 +208,6 @@ function StatsStrip({ snap }) {
       value=${fmtInt(stats.errors)}
       tone="red"
     />
-    ${/* A finished or abandoned run has no rate and nothing remaining —
-        the tiles would just show stale arithmetic. */ ""}
     ${live &&
     html`<${StatTile}
       label="Throughput"
