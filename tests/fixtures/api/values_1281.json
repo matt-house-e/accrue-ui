@@ -1,0 +1,137 @@
+{
+  "start": 1281,
+  "rows": [
+    {
+      "row": 1281,
+      "key": "stripe.com",
+      "cells": {
+        "classify": { "v": "fintech / payments", "s": 2 },
+        "web_search": { "v": "Series I · $6.5B raised", "s": 3 },
+        "summarize": { "v": "Payments infrastructure for the internet; expanding into billing, treasury, and issuing.", "s": 2 },
+        "score": { "v": "96 · strong", "s": 2 },
+        "email": { "v": "\"Scaling payments infrastructure at Stripe\"", "s": 2 }
+      }
+    },
+    {
+      "row": 1282,
+      "key": "figma.com",
+      "cells": {
+        "classify": { "v": "design / collaboration", "s": 2 },
+        "web_search": { "v": "Series F · $333M raised", "s": 2 },
+        "summarize": { "v": "Collaborative interface design in the browser; multiplayer editing and dev-mode handoff.", "s": 2 },
+        "score": { "v": "91 · strong", "s": 2 },
+        "email": { "v": "\"Design systems that scale with Figma\"", "s": 3 }
+      }
+    },
+    {
+      "row": 1283,
+      "key": "linear.app",
+      "cells": {
+        "classify": { "v": "dev tools / project management", "s": 2 },
+        "web_search": { "v": "RateLimitError · retrying", "s": 4 },
+        "summarize": { "v": null, "s": 0 },
+        "score": { "v": null, "s": 0 },
+        "email": { "v": null, "s": 0 }
+      }
+    },
+    {
+      "row": 1284,
+      "key": "vercel.com",
+      "cells": {
+        "classify": { "v": "cloud / hosting", "s": 2 },
+        "web_search": { "v": "RateLimitError · 3 attempts", "s": 5 },
+        "summarize": { "v": null, "s": 0 },
+        "score": { "v": null, "s": 0 },
+        "email": { "v": null, "s": 0 }
+      }
+    },
+    {
+      "row": 1285,
+      "key": "notion.so",
+      "cells": {
+        "classify": { "v": "productivity / docs", "s": 3 },
+        "web_search": { "v": "Series C · $343M raised", "s": 2 },
+        "summarize": { "v": "All-in-one workspace for notes, docs, and wikis; AI assistant woven across the workspace.", "s": 2 },
+        "score": { "v": "88 · strong", "s": 2 },
+        "email": { "v": null, "s": 6 }
+      }
+    },
+    {
+      "row": 1286,
+      "key": "anthropic.com",
+      "cells": {
+        "classify": { "v": "AI / research", "s": 2 },
+        "web_search": { "v": "Series F · $8B raised", "s": 2 },
+        "summarize": { "v": "AI safety company; builds the Claude family of models and agent tooling.", "s": 3 },
+        "score": { "v": "94 · strong", "s": 2 },
+        "email": { "v": "\"Deploying Claude safely in production\"", "s": 2 }
+      }
+    },
+    {
+      "row": 1287,
+      "key": "render.com",
+      "cells": {
+        "classify": { "v": "cloud / hosting", "s": 2 },
+        "web_search": { "v": "Series C · $157M raised", "s": 2 },
+        "summarize": { "v": "Cloud platform for apps and databases; zero-devops deploys straight from git.", "s": 2 },
+        "score": { "v": "71 · medium", "s": 2 },
+        "email": { "v": null, "s": 1 }
+      }
+    },
+    {
+      "row": 1288,
+      "key": "fly.io",
+      "cells": {
+        "classify": { "v": "cloud / hosting", "s": 2 },
+        "web_search": { "v": "Series C · $110M raised", "s": 3 },
+        "summarize": { "v": "Runs full-stack apps on hardware close to users; global edge regions.", "s": 2 },
+        "score": { "v": "69 · medium", "s": 2 },
+        "email": { "v": "\"Latency wins at the edge with Fly\"", "s": 2 }
+      }
+    },
+    {
+      "row": 1289,
+      "key": "supabase.com",
+      "cells": {
+        "classify": { "v": "dev tools / database", "s": 2 },
+        "web_search": { "v": "Series D · $396M raised", "s": 2 },
+        "summarize": { "v": "Open-source Firebase alternative on Postgres; auth, storage, and edge functions.", "s": 2 },
+        "score": { "v": null, "s": 1 },
+        "email": { "v": null, "s": 0 }
+      }
+    },
+    {
+      "row": 1290,
+      "key": "plaid.com",
+      "cells": {
+        "classify": { "v": "fintech / data", "s": 3 },
+        "web_search": { "v": "Series D · $734M raised", "s": 2 },
+        "summarize": { "v": "Connects consumer bank accounts to apps; payments, identity, and credit-risk APIs.", "s": 2 },
+        "score": { "v": "92 · strong", "s": 2 },
+        "email": { "v": "\"Bank data plumbing, minus the pain\"", "s": 2 }
+      }
+    },
+    {
+      "row": 1291,
+      "key": "ramp.com",
+      "cells": {
+        "classify": { "v": "fintech / spend management", "s": 2 },
+        "web_search": { "v": "Series D2 · $1.2B raised", "s": 2 },
+        "summarize": { "v": null, "s": 1 },
+        "score": { "v": null, "s": 0 },
+        "email": { "v": null, "s": 0 }
+      }
+    },
+    {
+      "row": 1292,
+      "key": "retool.com",
+      "cells": {
+        "classify": { "v": "dev tools / internal apps", "s": 2 },
+        "web_search": { "v": "Series C2 · $141M raised", "s": 2 },
+        "summarize": { "v": "Low-code builder for internal tools; drag-and-drop UI over any database or API.", "s": 2 },
+        "score": { "v": "83 · strong", "s": 2 },
+        "email": { "v": null, "s": 0 }
+      }
+    }
+  ]
+}

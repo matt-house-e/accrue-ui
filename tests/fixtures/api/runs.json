@@ -1,0 +1,25 @@
+{
+  "runs": [
+    {
+      "id": "2026-08-17a",
+      "name": "acme-enrichment",
+      "path": ".accrue/runs/2026-08-17a.jsonl",
+      "started_at": "2026-08-17T09:35:12Z",
+      "live": true
+    },
+    {
+      "id": "2026-08-16b",
+      "name": "acme-enrichment",
+      "path": ".accrue/runs/2026-08-16b.jsonl",
+      "started_at": "2026-08-16T14:02:44Z",
+      "live": false
+    },
+    {
+      "id": "2026-08-14a",
+      "name": "icp-scoring",
+      "path": ".accrue/runs/2026-08-14a.jsonl",
+      "started_at": "2026-08-14T11:19:03Z",
+      "live": false
+    }
+  ]
+}
