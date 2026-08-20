@@ -24,6 +24,8 @@ PRICES: dict[str, tuple[float, float]] = {
     "gpt-5.2-mini": (0.25, 2.00),
     "claude-sonnet-5": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.7-flash": (0.375, 1.875),
 }
 
 # Both OpenAI and Anthropic batch APIs bill at 50% of list price.

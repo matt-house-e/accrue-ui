@@ -33,3 +33,14 @@ def test_batch_discount_halves():
     batched = price_usd("claude-haiku-4-5", 100_000, 10_000, batch=True)
     assert full == pytest.approx(0.15)
     assert batched == pytest.approx(0.075)
+
+
+def test_gateway_prefixed_and_gemini_models_are_priced():
+    # vendor-prefixed id (OpenRouter etc.) resolves via the suffix
+    assert price_usd("openai/gpt-5.2-mini", 1_000_000, 0) == pytest.approx(0.25)
+    # gemini flash-lite priced from its real gateway rate
+    assert price_usd(
+        "google/gemini-3.5-flash-lite", 1_000_000, 1_000_000
+    ) == pytest.approx(2.80)
+    # unknown vendor/model still None
+    assert price_usd("acme/unknown-9b", 1_000, 1_000) is None
