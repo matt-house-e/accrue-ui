@@ -3,8 +3,8 @@
 Threat model: a local, single-user dashboard. The dangers are other local
 processes and hostile web pages the user has open (CSRF, DNS rebinding) —
 not the network at large. **Binding the server to 127.0.0.1 only is the
-runner's job (issue #3)**; this module assumes loopback binding and adds the
-browser-facing layers:
+CLI's job (``cli.py``, hardcoded — no flag to widen it)**; this module
+assumes loopback binding and adds the browser-facing layers:
 
 - **Launch token.** ``?token=<t>`` on the first page hit sets an HttpOnly
   cookie; after that every ``/api/*`` request must present the token via the
