@@ -7,10 +7,13 @@ import {
   cellDetail,
   cellDetailLoading,
   closeInspector,
+  postRetry,
+  retryBusy,
   selection,
   showInternalFields,
   snapshot,
 } from "../lib/store.js";
+import { RetryNote } from "./triage.js";
 
 const STATUS_BYTE = {
   pending: 0,
@@ -205,12 +208,17 @@ export function Inspector() {
       </div>
       <div class="insp-body">${body}</div>
       <div class="insp-foot">
+        <${RetryNote} source=${`row:${sel.row}`} />
         <span
           class=${retry.available ? "" : "tip"}
           data-tip=${retry.available ? null : retry.reason}
         >
-          <button class="btn btn-primary" disabled=${!retry.available}>
-            Retry this row
+          <button
+            class="btn btn-primary"
+            disabled=${!retry.available || retryBusy()}
+            onClick=${() => postRetry({ rows: [sel.row] }, `row:${sel.row}`)}
+          >
+            ${retryBusy() ? "Retrying…" : "Retry this row"}
           </button>
         </span>
         <button class="btn btn-secondary" onClick=${copyResume}>

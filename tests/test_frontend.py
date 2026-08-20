@@ -147,7 +147,13 @@ def test_run_fixture_shape():
         "cache_read",
         "cache_write",
     }
-    assert set(doc["retry"]) == {"available", "reason", "resume_command"}
+    assert set(doc["retry"]) == {
+        "available",
+        "reason",
+        "resume_command",
+        "running",
+        "last_error",
+    }
     for group in doc["error_groups"]:
         assert set(group) == {
             "step",
@@ -285,10 +291,40 @@ def test_events_fixture_shape():
             _row, step_index, state = cell
             assert 0 <= step_index < nsteps
             assert 0 <= state <= 6
-        assert set(delta["stats"]) <= stats_keys
+        # rows_done is the one delta-only stats key (docs/api-shapes.md).
+        assert set(delta["stats"]) <= stats_keys | {"rows_done"}
         for step in delta["steps"]:
             assert set(step) == {"name", "done", "errors"}
             assert step["name"] in step_names
+
+
+def test_retry_buttons_are_wired_to_the_endpoint():
+    """No JS runtime here (no node, ever) — pin the wiring at source level."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    assert '"/api/retry"' in store
+    assert '"POST"' in store
+    assert "X-Accrue-Token" not in store  # same-origin: the cookie authenticates
+    assert "rows_done" in store  # the delta-only key feeds rows.done
+
+    triage = (STATIC / "views" / "triage.js").read_text()
+    assert "postRetry({ all: true }" in triage.replace("\n", " ") or (
+        "body=${{ all: true }}" in triage
+    )
+    assert "group: { step: group.step, type: group.type }" in triage
+    assert "retryBusy()" in triage
+
+    inspector = (STATIC / "views" / "inspector.js").read_text()
+    assert "postRetry({ rows: [sel.row] }" in inspector
+    assert "retryBusy()" in inspector
+
+
+def test_retry_note_uses_existing_error_tokens():
+    """Inline retry errors reuse the failed-red token; no new colors."""
+    css = (STATIC / "style.css").read_text()
+    assert ".retry-note" in css
+    block = css.split(".retry-note", 1)[1].split("}", 1)[0]
+    assert "var(--error-text)" in block
+    assert "#" not in block  # no literal colors outside the :root token table
 
 
 # ---- devstub serves the app + fixtures ----------------------------------

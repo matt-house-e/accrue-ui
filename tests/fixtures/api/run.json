@@ -283,6 +283,8 @@
   "retry": {
     "available": false,
     "reason": "launched without --pipeline",
-    "resume_command": "accrue watch --pipeline enrich:pipeline"
+    "resume_command": "accrue-ui .accrue/runs/2026-08-17a.jsonl --pipeline <module:attr>",
+    "running": false,
+    "last_error": null
   }
 }

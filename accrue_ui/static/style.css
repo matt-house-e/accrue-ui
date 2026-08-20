@@ -873,6 +873,21 @@ button:disabled { cursor: not-allowed; }
 }
 .triage-foot .btn { margin-left: auto; }
 
+/* Inline retry failure (a 409, or the retry task's own error): quiet red
+   text beside the button that asked for it — never a banner. */
+.retry-note {
+  font: 400 11px/1.4 var(--font-mono);
+  color: var(--error-text);
+  margin-right: 10px;
+  max-width: 340px;
+  display: inline-block;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-foot .retry-note { margin-right: auto; }
+
 /* ---------- cost ---------- */
 
 .cost {
