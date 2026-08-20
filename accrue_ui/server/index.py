@@ -11,24 +11,26 @@ Cell state fits one byte: 0 pending, 1 running, 2 ok, 3 cached, 4 retrying,
 5 error, 6 skipped. The v1 log has no per-row start events, so "running" (1)
 cannot be inferred cheaply from step_start..row_complete bracketing — a step
 in progress with rows not yet completed leaves those cells pending (0), and
-state 1 is reserved for a future emitter. "retrying" (4) is likewise
-reserved: v1 emits exactly one terminal row_complete per cell *per segment*.
+state 1 is reserved for a future emitter.
 
 A ``retry_failed()`` segment appends a second ``row_complete`` for cells it
-re-executes (framed by ``retry_start`` / ``retry_end``, which this index
-ignores like any unknown record type). Re-delivery is therefore normal, not
-a fault: the new record replaces the cell's state, and the error groups heal
-with it — a cell that flips error -> ok leaves its group, and the group
-disappears once its last row does.
+re-executes, framed by ``retry_start`` / ``retry_end``. ``retry_start`` names
+those cells exactly, which is what makes state 4 (retrying) knowable: they
+are marked in flight there and leave every settled tally (step counters,
+error groups, ``rows.done``) until their own ``row_complete`` lands.
+Re-delivery is therefore normal, not a fault: the new record replaces the
+cell's state, and the error groups heal with it — a cell that flips
+error -> ok leaves its group, and the group disappears once its last row
+does.
 """
 
 from __future__ import annotations
 
 import base64
-import bisect
 import json
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +50,16 @@ BURST_MIN_COUNT = 10
 BURST_MAX_SPAN_S = 240.0
 LIVE_MTIME_WINDOW_S = 5.0
 THROUGHPUT_WINDOW_S = 60.0
+#: Floor on the throughput divisor. Dividing a handful of completions by the
+#: first fraction of a second of log time reports thousands of rows/min and
+#: an ETA to match; below this much log time there is no honest rate to give.
+THROUGHPUT_MIN_WINDOW_S = 5.0
+#: Row indices this large are treated as corrupt when the log never declared
+#: a row count: the grid is rows x steps bytes, so one bogus index would
+#: otherwise allocate gigabytes.
+ROW_INDEX_CAP = 1_000_000
+#: Raw records kept per cell (newest first out of the log, oldest dropped).
+MAX_CELL_EVENTS = 50
 SCHEMA_V = 1
 
 
@@ -63,7 +75,10 @@ class Cell:
     t: float | None = None  # log-time of the terminal record
     values: dict[str, Any] | None = None
     preview: str | None = None
-    events: list[tuple[int, int]] = field(default_factory=list)  # (offset, len)
+    #: One entry per row_complete seen for this cell: (offset, length,
+    #: from_a_retry_segment). The bytes are re-read on demand; the flag is
+    #: what makes the inspector's attempt list say "retry".
+    events: list[tuple[int, int, bool]] = field(default_factory=list)
 
 
 @dataclass
@@ -152,6 +167,8 @@ class RunIndex:
 
         self._steps: list[StepState] = []
         self._step_idx: dict[str, int] = {}
+        self._declared_rows: int | None = None  # pipeline_start's num_rows
+        self._in_retry = False  # inside a retry_start..retry_end segment
         self._nrows = 0
         self._cells = bytearray()
         # Terminal cells per row + the count of fully-done rows, maintained
@@ -161,7 +178,10 @@ class RunIndex:
         self._row_keys: dict[int, str] = {}  # values-derived heuristic labels
         self._row_keys_explicit: dict[int, str] = {}  # from row_complete "key"
         self._error_groups: dict[tuple[str, str], ErrorGroup] = {}
-        self._completion_ts: list[float] = []  # non-decreasing (log guarantee)
+        # Completion log-times inside the throughput window, non-decreasing
+        # (log guarantee). Trimmed from the left on every append, so a
+        # million-row run holds a window's worth, not a million floats.
+        self._completion_ts: deque[float] = deque()
         self._old_nsteps = 0  # column count the cells array was laid out with
         # --- SSE delta tracking (drained by the coalescer, see drain_delta) --
         self._dirty_cells: dict[tuple[int, int], int] = {}  # (row, step) -> state
@@ -233,6 +253,18 @@ class RunIndex:
     def _map_mode(mode: Any) -> str:
         return "batch" if mode == "batch" else "live"
 
+    @property
+    def _row_limit(self) -> int:
+        """One past the highest row index this log is allowed to mention.
+
+        The declared ``num_rows`` when there is one, else a hard cap. The
+        cell grid is ``rows * steps`` bytes, so a single corrupt index
+        (``row: 50000000``) would otherwise resize it to gigabytes.
+        """
+        if self._declared_rows is not None:
+            return self._declared_rows
+        return ROW_INDEX_CAP
+
     # ----------------------------------------------------------------- apply
 
     def apply(self, record: TailRecord) -> None:
@@ -251,6 +283,10 @@ class RunIndex:
             self._apply_step_end(data)
         elif rtype == "pipeline_end":
             self._apply_pipeline_end(data)
+        elif rtype == "retry_start":
+            self._apply_retry_start(data)
+        elif rtype == "retry_end":
+            self._in_retry = False
         # Unknown record types are ignored (v1 contract: additive changes).
 
     def _apply_pipeline_start(self, data: dict[str, Any]) -> None:
@@ -261,12 +297,7 @@ class RunIndex:
             self.schema_v = v
         plan = data.get("plan")
         self.plan = plan if isinstance(plan, dict) else None
-        started = data.get("started_at")
-        if isinstance(started, str):
-            try:
-                self.started_at = datetime.fromisoformat(started)
-            except ValueError:
-                self.started_at = None
+        self.started_at = _parse_iso(data.get("started_at"))
         for spec in data.get("steps") or []:
             name = spec.get("name")
             if not isinstance(name, str):
@@ -276,7 +307,8 @@ class RunIndex:
             step.mode = self._map_mode(spec.get("mode"))
             step.model = spec.get("model")
         num_rows = data.get("num_rows")
-        if isinstance(num_rows, int):
+        if isinstance(num_rows, int) and 0 <= num_rows <= ROW_INDEX_CAP:
+            self._declared_rows = num_rows
             self._ensure_dims(nrows=num_rows)
             for step in self._steps:
                 step.total = step.total or num_rows
@@ -289,17 +321,69 @@ class RunIndex:
         step.level = int(data.get("level") or step.level)
         step.mode = self._map_mode(data.get("mode"))
         num_rows = data.get("num_rows")
-        if isinstance(num_rows, int):
+        if isinstance(num_rows, int) and 0 <= num_rows <= self._row_limit:
             # A retry segment re-opens the step with only the retried rows;
             # the grid still has the whole run in it, so totals never shrink.
             step.total = max(step.total, num_rows)
             self._ensure_dims(nrows=num_rows)
+
+    def _apply_retry_start(self, data: dict[str, Any]) -> None:
+        """Mark the cells this retry segment is about to re-execute.
+
+        ``retry_start`` lists them exactly (``cells: [{step, row}, ...]``),
+        which is the one moment state 4 (retrying) is knowable: the v1 log
+        has no per-row start events, so between here and each cell's
+        ``row_complete`` these are the cells in flight. Their old terminal
+        state is unwound first — the counters, the error group and
+        ``rows.done`` all describe cells that are no longer settled.
+        """
+        self._in_retry = True
+        cells = data.get("cells")
+        if not isinstance(cells, list):
+            return
+        for entry in cells:
+            if not isinstance(entry, dict):
+                continue
+            name, row = entry.get("step"), entry.get("row")
+            if not isinstance(name, str) or not isinstance(row, int) or row < 0:
+                continue
+            if row >= self._row_limit:
+                continue
+            step = self._step(name)
+            self._ensure_dims(row=row)
+            idx = self._step_idx[name]
+            pos = row * len(self._steps) + idx
+            prev = self._cells[pos]
+            if prev == RETRYING:
+                continue
+            if prev in TERMINAL:
+                self._clear_terminal(step, row, prev)
+            self._cells[pos] = RETRYING
+            self._dirty_cells[(row, idx)] = RETRYING
+            self._dirty_steps.add(name)
+
+    def _clear_terminal(self, step: StepState, row: int, prev: int) -> None:
+        """Undo everything a settled cell contributed; it is being re-run."""
+        step.done -= 1
+        if prev == ERROR:
+            step.errors -= 1
+            self._forget_error(step.name, row, step.cells.get(row))
+        elif prev == CACHED:
+            step.cached_count -= 1
+        if self._row_terminal[row] == len(self._steps):
+            self._rows_done -= 1
+        self._row_terminal[row] -= 1
 
     def _apply_row_complete(self, record: TailRecord) -> None:
         data = record.data
         name = data.get("step")
         row = data.get("row")
         if not isinstance(name, str) or not isinstance(row, int) or row < 0:
+            return
+        if row >= self._row_limit:
+            # Beyond what the run declared (or beyond any plausible run):
+            # a corrupt index, not a row. Sizing the grid to it would
+            # allocate a 50M-cell array for one bad line.
             return
         step = self._step(name)
         self._ensure_dims(row=row)
@@ -325,17 +409,12 @@ class RunIndex:
         self._dirty_steps.add(name)
         if prev in TERMINAL:
             # Re-delivery (a retry segment, or a duplicate): unwind the old
-            # terminal state before applying the new one.
-            step.done -= 1
-            if prev == ERROR:
-                step.errors -= 1
-                self._forget_error(name, row, cell)
-            elif prev == CACHED:
-                step.cached_count -= 1
-        else:
-            self._row_terminal[row] += 1
-            if self._row_terminal[row] == nsteps:
-                self._rows_done += 1
+            # terminal state before applying the new one. A cell marked
+            # RETRYING by retry_start was already unwound there.
+            self._clear_terminal(step, row, prev)
+        self._row_terminal[row] += 1
+        if self._row_terminal[row] == nsteps:
+            self._rows_done += 1
         step.done += 1
         if state == ERROR:
             step.errors += 1
@@ -344,7 +423,7 @@ class RunIndex:
 
         t = data.get("t")
         t = float(t) if isinstance(t, (int, float)) else self.last_t
-        self._completion_ts.append(t)
+        self._trim_completions(t)
 
         values = data.get("values")
         values = values if isinstance(values, dict) else None
@@ -365,7 +444,12 @@ class RunIndex:
         cell.t = t
         cell.values = values
         cell.preview = self._render_preview(state, values, error)
-        cell.events.append((record.offset, record.length))
+        cell.events.append((record.offset, record.length, self._in_retry))
+        if len(cell.events) > MAX_CELL_EVENTS:
+            # A pathological log (or a cell retried hundreds of times) must
+            # not grow this list forever; the inspector wants the recent
+            # attempts, not all of them.
+            del cell.events[:-MAX_CELL_EVENTS]
 
         # Row label: an explicit "key" field (additive in core, string|null)
         # wins over the values-derived heuristic; logs without it still label
@@ -415,6 +499,14 @@ class RunIndex:
             if not group.message:
                 group.message = str((error or {}).get("msg") or "")
             group.rows[row] = t
+
+    def _trim_completions(self, t: float) -> None:
+        """Record a completion at log-time *t*, dropping ones out of window."""
+        ts = self._completion_ts
+        ts.append(t)
+        cutoff = t - THROUGHPUT_WINDOW_S
+        while ts and ts[0] < cutoff:
+            ts.popleft()
 
     def _forget_error(self, step_name: str, row: int, cell: Cell | None) -> None:
         """Drop *row* from the group its previous failure belonged to.
@@ -506,20 +598,28 @@ class RunIndex:
         }
 
     def is_live(self) -> bool:
-        """Recently written, or the log never saw its pipeline_end."""
+        """Was the log written to just now? That is the whole definition.
+
+        Emphatically NOT "or it never saw a pipeline_end": a run killed
+        three days ago has no pipeline_end and never will, and pulsing LIVE
+        at it forever is a lie the whole UI then builds on (a climbing
+        elapsed clock, an ETA, a throughput number).
+        """
         try:
             mtime = os.stat(self.path).st_mtime
         except OSError:
-            mtime = 0.0
-        recently_written = (time.time() - mtime) < LIVE_MTIME_WINDOW_S
-        return recently_written or not self.finished
+            return False
+        return (time.time() - mtime) < LIVE_MTIME_WINDOW_S
 
     def _elapsed_s(self) -> float:
+        """Wall-clock for a live run; the log's own span for a dead one."""
         if self.finished and self.final_elapsed_s is not None:
             return self.final_elapsed_s
-        if self.started_at is not None:
+        if self.started_at is not None and self.is_live():
             started = self.started_at.astimezone(timezone.utc)
             return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+        # Interrupted and long cold: the run lasted until its last record,
+        # not until now.
         return self.last_t
 
     def _stats_block(self, cost: dict[str, Any]) -> dict[str, Any]:
@@ -532,7 +632,7 @@ class RunIndex:
         remaining = max(0, total_cells - total_done)
         if self.finished:
             eta_s: float | None = 0.0
-        elif throughput > 0:
+        elif throughput:
             eta_s = remaining / (throughput / 60.0)
         else:
             eta_s = None
@@ -625,16 +725,25 @@ class RunIndex:
             "steps": steps,
         }
 
-    def _throughput_per_min(self) -> float:
+    def _throughput_per_min(self) -> float | None:
+        """Completions per minute over the recent window, or None if unknowable.
+
+        The divisor is log time, floored at THROUGHPUT_MIN_WINDOW_S: the
+        first few completions of a run land within milliseconds of each
+        other, and dividing by that reports a rate of tens of thousands per
+        minute (and an ETA of seconds for an hour-long run). Until the log
+        has that much time in it there is no rate to report, so the tile
+        shows an em-dash rather than a fantasy.
+        """
         ts = self._completion_ts
         if not ts:
-            return 0.0
-        newest = ts[-1]
-        window = min(THROUGHPUT_WINDOW_S, newest) or newest
-        if window <= 0:
-            return 0.0
-        count = len(ts) - bisect.bisect_left(ts, newest - window)
-        return count / window * 60.0
+            return None
+        window = min(THROUGHPUT_WINDOW_S, ts[-1])
+        if window < THROUGHPUT_MIN_WINDOW_S:
+            return None
+        # The deque holds exactly the window (trimmed on append), so its
+        # length is the count — no scan, no bisect.
+        return len(ts) / window * 60.0
 
     def _error_groups_block(self) -> list[dict[str, Any]]:
         groups = sorted(self._error_groups.values(), key=lambda g: -g.count)
@@ -763,18 +872,10 @@ class RunIndex:
                 "cost": round(cost, 6) if cost is not None else None,
             }
 
+        records = self._read_events(cell.events) if cell else []
         attempts = None
-        if cell is not None and state in (OK, ERROR) and not cell.from_cache:
-            attempts = [
-                {
-                    "n": 1,
-                    "kind": "batch" if step.is_batch else "live",
-                    "at": self._iso(cell.t),
-                    "latency_ms": cell.elapsed_ms,
-                    "status": "error" if state == ERROR else "ok",
-                    "backoff_s": None,
-                }
-            ]
+        if cell is not None and records and not cell.from_cache:
+            attempts = self._attempts(step, state, records)
 
         return {
             "step": step_name,
@@ -789,16 +890,59 @@ class RunIndex:
             "queued_at": None,
             "attempts": attempts,
             "values": cell.values if cell and state in (OK, CACHED) else None,
-            "raw_events": self._read_raw(cell.events) if cell else [],
+            "raw_events": [record for record, _retry in records],
         }
 
-    def _read_raw(self, events: list[tuple[int, int]]) -> list[dict[str, Any]]:
-        """Re-read raw records from the log by offset; nothing cached in RAM."""
-        out: list[dict[str, Any]] = []
+    def _attempts(
+        self, step: StepState, state: int, records: list[tuple[dict[str, Any], bool]]
+    ) -> list[dict[str, Any]] | None:
+        """One attempt per row_complete this cell actually produced.
+
+        A retried cell has two or more records in the log, so "Failed after
+        1 attempts" was never true of a cell you had already retried — the
+        count came from a hard-coded single-entry list. Records that landed
+        inside a ``retry_start`` … ``retry_end`` segment are kind ``retry``;
+        the rest are ``batch`` or ``live`` after the step's mode.
+        """
+        if state in (PENDING, SKIPPED):
+            return None  # nothing ever ran for this cell
+        attempts = []
+        for n, (record, from_retry) in enumerate(records, start=1):
+            if from_retry:
+                kind = "retry"
+            else:
+                kind = "batch" if step.is_batch else "live"
+            latency = record.get("elapsed_ms")
+            t = record.get("t")
+            attempts.append(
+                {
+                    "n": n,
+                    "kind": kind,
+                    "at": self._iso(float(t)) if isinstance(t, (int, float)) else None,
+                    "latency_ms": latency
+                    if isinstance(latency, (int, float))
+                    else None,
+                    "status": "error" if record.get("status") == "error" else "ok",
+                    # The v1 log records no inter-attempt sleep.
+                    "backoff_s": None,
+                }
+            )
+        return attempts
+
+    def _read_events(
+        self, events: list[tuple[int, int, bool]]
+    ) -> list[tuple[dict[str, Any], bool]]:
+        """Re-read raw records from the log by offset; nothing cached in RAM.
+
+        Each pairs with the flag saying whether it came from a retry
+        segment, so one file read serves both ``raw_events`` and the
+        attempt list.
+        """
+        out: list[tuple[dict[str, Any], bool]] = []
         if not events:
             return out
         with open(self.path, "rb") as f:
-            for offset, length in events:
+            for offset, length, from_retry in events:
                 f.seek(offset)
                 raw = f.read(length)
                 try:
@@ -806,7 +950,7 @@ class RunIndex:
                 except json.JSONDecodeError:
                     continue  # file was replaced under us; offsets are stale
                 if isinstance(parsed, dict):
-                    out.append(parsed)
+                    out.append((parsed, from_retry))
         return out
 
 
@@ -816,6 +960,21 @@ class RunIndex:
 def _error_type(error: dict[str, Any] | None) -> str:
     """Group key for a failure; the v1 log's error object may be null."""
     return str((error or {}).get("type") or "Error")
+
+
+def _parse_iso(raw: Any) -> datetime | None:
+    """Parse a log timestamp, tolerating the ``Z`` suffix.
+
+    ``datetime.fromisoformat`` only learned ``Z`` in 3.11 and this package
+    supports 3.10 — and Z-form is exactly what the fixtures (and any emitter
+    using ``isoformat().replace("+00:00", "Z")``) write.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _one_line(text: str) -> str:
@@ -890,14 +1049,12 @@ def scan_runs(directory: str | Path) -> list[dict[str, Any]]:
         run_id = path.stem
         if first and first.get("type") == "pipeline_start":
             run_id = first.get("run_id") or run_id
-            raw = first.get("started_at")
-            if isinstance(raw, str):
-                try:
-                    started_at = _iso_utc(datetime.fromisoformat(raw))
-                except ValueError:
-                    started_at = None
-        ended = _last_record_is_pipeline_end(path)
-        live = (time.time() - st.st_mtime) < LIVE_MTIME_WINDOW_S or not ended
+            parsed = _parse_iso(first.get("started_at"))
+            started_at = _iso_utc(parsed) if parsed else None
+        # Live means "being written to right now" — same rule as
+        # RunIndex.is_live(), and for the same reason (an interrupted run
+        # has no pipeline_end and is not live because of it).
+        live = (time.time() - st.st_mtime) < LIVE_MTIME_WINDOW_S
         mtime_iso = _iso_utc(datetime.fromtimestamp(st.st_mtime, tz=timezone.utc))
         runs.append(
             {
@@ -926,23 +1083,3 @@ def _read_first_record(path: Path) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def _last_record_is_pipeline_end(path: Path) -> bool:
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - (1 << 16)))
-            chunk = f.read()
-    except OSError:
-        return False
-    for line in reversed(chunk.splitlines()):
-        if not line.strip():
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            return False
-        return isinstance(parsed, dict) and parsed.get("type") == "pipeline_end"
-    return False

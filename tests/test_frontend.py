@@ -63,7 +63,7 @@ def stub_url():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "accrue_ui.devstub", "--port", str(port)],
+        [sys.executable, str(ROOT / "tools" / "devstub.py"), "--port", str(port)],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -171,6 +171,10 @@ def test_run_fixture_shape():
 def test_run_fixture_invariants():
     doc = _run_doc()
     spend = doc["stats"]["spend"]
+    # The sum invariant is scoped to a priced run: an unpriceable one reports
+    # null spend and empty maps (docs/api-shapes.md, and test_contract.py's
+    # test_stats_and_cost_with_no_pricing).
+    assert spend is not None
     assert round(sum(doc["cost"]["by_step"].values()), 2) == spend
     assert round(sum(doc["cost"]["by_model"].values()), 2) == spend
     assert sum(g["count"] for g in doc["error_groups"]) == doc["stats"]["errors"]
@@ -316,6 +320,118 @@ def test_retry_buttons_are_wired_to_the_endpoint():
     inspector = (STATIC / "views" / "inspector.js").read_text()
     assert "postRetry({ rows: [sel.row] }" in inspector
     assert "retryBusy()" in inspector
+
+
+def test_launch_token_is_scrubbed_from_the_address_bar():
+    """?token= is exchanged for a cookie at boot; it must not linger in the URL."""
+    app_js = (STATIC / "app.js").read_text()
+    assert "history.replaceState" in app_js
+    assert 'searchParams.delete("token")' in app_js
+
+
+def test_devstub_is_not_inside_the_package():
+    """The stub has no auth at all — it must never ship in the wheel."""
+    assert not (ROOT / "accrue_ui" / "devstub.py").exists()
+    assert (ROOT / "tools" / "devstub.py").is_file()
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    assert 'include = ["accrue_ui*"]' in pyproject
+    assert '"tools*"' in pyproject
+
+
+def test_values_fetching_pages_and_cannot_feed_itself():
+    """No JS runtime here — pin the loop-break at source level.
+
+    Two halves: the row-list memo must not depend on valuesVersion (loading
+    values would otherwise recompute it, re-firing the fetch effect), and
+    the fetch must ask only for uncached rows in server-sized pages.
+    """
+    grid = (STATIC / "views" / "grid.js").read_text()
+    memo_deps = grid.split("computeRows(arr, nsteps, filter, query)", 1)[1]
+    memo_deps = memo_deps.split("]", 1)[0]
+    assert "vversion" not in memo_deps
+    assert "VALUES_PAGE_MAX = 1000" in grid  # matches the server's clamp
+    assert "missingWindows" in grid
+    assert "!valuesCache.has(r)" in grid
+    # The fetch effect keys off the row SET, not every cell-state bump.
+    effect_deps = grid.split("}, 150);", 1)[1].split("[", 1)[1].split("]", 1)[0]
+    assert "version" not in effect_deps
+    assert "rows.length" in effect_deps
+
+
+def test_grid_clamps_the_first_visible_row():
+    """Switching to a sparser filter must not blank the grid for a frame."""
+    grid = (STATIC / "views" / "grid.js").read_text()
+    assert "Math.max(0, rows.length - 1)" in grid
+
+
+def test_search_placeholder_admits_the_cache_limit():
+    assert 'placeholder="Search loaded keys…"' in (STATIC / "app.js").read_text()
+
+
+def test_error_groups_refetch_when_a_delta_moves_the_error_count():
+    """Deltas carry counters, not groups: the triage list must catch up."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    assert "refreshErrorGroups" in store
+    assert "errorGroupsStale" in store
+    assert "errorsMoved" in store
+    triage = (STATIC / "views" / "triage.js").read_text()
+    assert "errorGroupsStale" in triage
+
+
+def test_stat_tiles_are_honest_when_the_run_is_not_live():
+    """No throughput or ETA tile for a run nothing is writing to."""
+    app_js = (STATIC / "app.js").read_text()
+    assert "const live = snap.run.live" in app_js
+    for label in ("Throughput", "Time remaining"):
+        guarded = "${live &&\n    html`<${StatTile}\n      label=" + f'"{label}"'
+        assert guarded in app_js, label
+    # Throughput renders as an integer, and as an em-dash when unknown.
+    assert "fmtInt(Math.round(throughput))" in app_js
+    assert "throughput == null" in app_js
+
+
+def test_nullable_money_renders_as_an_em_dash():
+    """spend/cache_saved/wasted/batch_saved are number|null — never blank."""
+    cost = (STATIC / "views" / "cost.js").read_text()
+    assert 'const DASH = "—"' in cost
+    assert "value ?? DASH" in cost
+    assert "if (value == null) return null;" not in cost  # tiles are kept
+    app_js = (STATIC / "app.js").read_text()
+    assert "fmtMoney(stats.spend) ?? DASH" in app_js
+    css = (STATIC / "style.css").read_text()
+    assert ".cost-tile .v.dim" in css
+
+
+def test_run_chip_does_not_repeat_the_id():
+    app_js = (STATIC / "app.js").read_text()
+    assert "run.name !== run.id" in app_js
+    assert "${runLabel(run)}" in app_js
+    assert "${r.name} / ${r.id}" not in app_js
+
+
+def test_attempt_count_is_pluralized():
+    inspector = (STATIC / "views" / "inspector.js").read_text()
+    assert 'after ${plural(n, "attempt")}' in inspector
+    assert "attempts —" not in inspector
+
+
+def test_cost_bars_match_the_approved_design():
+    """Single-hue CSS bars: jade fill, 14px, rounded right end, mono value."""
+    cost = (STATIC / "views" / "cost.js").read_text()
+    # Label, bar, value — in that order, in the same row.
+    row = cost.split('class="bar-row"', 1)[1].split("</div>", 1)[0]
+    assert row.index("bar-label") < row.index("bar-fill") < row.index("bar-value")
+    assert "(value / max) * 100" in row  # widths proportional to the max
+
+    css = (STATIC / "style.css").read_text()
+    fill = css.split(".bar-fill {", 1)[1].split("}", 1)[0]
+    assert "height: 14px" in fill
+    assert "background: var(--jade-9)" in fill  # #29a383, via the token table
+    assert "border-radius: 0 4px 4px 0" in fill  # right end only
+    assert "#" not in fill  # no literal colors outside :root
+    value = css.split(".bar-row .bar-value {", 1)[1].split("}", 1)[0]
+    assert "var(--font-mono)" in value
+    assert "text-align: right" in value
 
 
 def test_retry_note_uses_existing_error_tokens():

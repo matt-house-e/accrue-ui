@@ -458,50 +458,154 @@ def test_retry_failing_with_a_different_type_switches_group(tmp_path: Path):
     assert sum(g["count"] for g in snap["error_groups"]) == 3
 
 
-def test_unknown_record_types_are_ignored(tmp_path: Path):
-    """retry_start/retry_end frame a retry segment; v1 consumers skip them."""
+def _retry_start(cells: list[tuple[str, int]], t: float = 19.0) -> dict:
+    return {
+        "v": 1,
+        "t": t,
+        "type": "retry_start",
+        "run_id": "heal-run",
+        "started_at": "2026-08-20T10:05:00+00:00",
+        "num_rows": 6,
+        "num_cells": len(cells),
+        "cells": [{"step": step, "row": r} for step, r in cells],
+    }
+
+
+def _retry_end(t: float = 21.0, num_cells: int = 2) -> dict:
+    return {
+        "v": 1,
+        "t": t,
+        "type": "retry_end",
+        "num_rows": 6,
+        "total_errors": 0,
+        "cost": {"in": 0, "out": 0, "cost": None},
+        "elapsed_s": 2.0,
+        "num_cells": num_cells,
+    }
+
+
+def _cell_states(index: RunIndex, step: str) -> list[int]:
+    data = base64.b64decode(index.snapshot()["cells"]["data"])
+    nsteps = len(index.steps)
+    si = [s.name for s in index.steps].index(step)
+    return [data[r * nsteps + si] for r in range(index.nrows)]
+
+
+def test_retry_start_marks_its_cells_retrying(tmp_path: Path):
+    """State 4 is knowable exactly once: while a retry segment holds them."""
     index = _index_from(_failing_log(tmp_path))
     before = index.snapshot()
+    assert before["stats"]["errors"] == 3
 
-    index.apply(
-        TailRecord(
-            0,
-            1,
-            {
-                "v": 1,
-                "t": 19.0,
-                "type": "retry_start",
-                "run_id": "heal-run",
-                "started_at": "2026-08-20T10:05:00+00:00",
-                "num_rows": 6,
-                "num_cells": 2,
-                "cells": [{"step": "fetch", "row": 1}, {"step": "fetch", "row": 4}],
-            },
-        )
-    )
+    index.apply(TailRecord(0, 1, _retry_start([("fetch", 1), ("fetch", 4)])))
+    during = index.snapshot()
+    assert _cell_states(index, "fetch")[1] == RETRYING
+    assert _cell_states(index, "fetch")[4] == RETRYING
+    # In flight, so no longer counted as settled failures anywhere.
+    assert during["stats"]["errors"] == 1
+    assert index.group_rows("fetch", "Boom") is None
+    assert during["steps"][0]["done"] == before["steps"][0]["done"] - 2
+    assert index.cell_detail("fetch", 1)["status"] == "retrying"
+
+    # They resolve on their own row_completes: row 1 heals, row 4 fails again.
     index.apply(TailRecord(0, 1, row("fetch", 1, 20.0, values={"company": "c1"})))
     index.apply(
         TailRecord(
             0,
             1,
-            {
-                "v": 1,
-                "t": 21.0,
-                "type": "retry_end",
-                "num_rows": 6,
-                "total_errors": 0,
-                "cost": {"in": 0, "out": 0, "cost": None},
-                "elapsed_s": 2.0,
-                "num_cells": 2,
-            },
+            row(
+                "fetch",
+                4,
+                20.5,
+                status="error",
+                error={"type": "Boom", "msg": "kaboom"},
+            ),
         )
     )
-    index.apply(TailRecord(0, 1, {"v": 1, "t": 22.0, "type": "some_future_record"}))
-
+    index.apply(TailRecord(0, 1, _retry_end()))
     after = index.snapshot()
-    assert after["stats"]["errors"] == before["stats"]["errors"] - 1
+    assert _cell_states(index, "fetch")[1] == OK
+    assert _cell_states(index, "fetch")[4] == ERROR
+    assert after["stats"]["errors"] == 2  # row 2 (Other) + row 4 again
+    assert index.group_rows("fetch", "Boom") == [4]
+    # Counters land exactly where they started, not one retry adrift.
+    assert after["steps"][0]["done"] == before["steps"][0]["done"]
+    assert after["rows"]["done"] == before["rows"]["done"]
+
+
+def test_unknown_record_types_are_ignored(tmp_path: Path):
+    """retry_end frames the segment; future record types change nothing."""
+    index = _index_from(_failing_log(tmp_path))
+    before = index.snapshot()
+    index.apply(TailRecord(0, 1, _retry_end()))
+    index.apply(TailRecord(0, 1, {"v": 1, "t": 22.0, "type": "some_future_record"}))
+    after = index.snapshot()
+    assert after["stats"] == before["stats"]
     assert after["run"]["id"] == before["run"]["id"]
     assert [s["total"] for s in after["steps"]] == [s["total"] for s in before["steps"]]
+
+
+def _two_segment_log(tmp_path: Path) -> Path:
+    """A run where row 0 fails, then a retry segment heals it."""
+    records = [
+        *_records(num_rows=3),
+        row(
+            "fetch",
+            0,
+            1.0,
+            status="error",
+            error={"type": "Boom", "msg": "kaboom"},
+            elapsed_ms=1900,
+        ),
+        row("fetch", 1, 1.1, values={"company": "c1"}),
+        row("fetch", 2, 1.2, values={"company": "c2"}),
+        {
+            "v": 1,
+            "t": 2.0,
+            "type": "pipeline_end",
+            "num_rows": 3,
+            "total_errors": 1,
+            "cost": {"in": 0, "out": 0, "cost": None},
+            "elapsed_s": 2.0,
+        },
+        _retry_start([("fetch", 0)], t=3.0),
+        {
+            "v": 1,
+            "t": 3.1,
+            "type": "step_start",
+            "step": "fetch",
+            "level": 0,
+            "mode": "realtime",
+            "num_rows": 1,
+        },
+        row("fetch", 0, 4.0, values={"company": "c0"}, elapsed_ms=4200),
+        _retry_end(t=4.5, num_cells=1),
+    ]
+    log = tmp_path / "two_segments.jsonl"
+    write_log(log, records)
+    age_file(log)
+    return log
+
+
+def test_attempts_come_from_the_cells_real_records(tmp_path: Path):
+    """Two records in the log = two attempts, the second one a retry.
+
+    The list used to be a hard-coded single entry, so a cell you had
+    retried three times still reported "Failed after 1 attempts".
+    """
+    log = _two_segment_log(tmp_path)
+    with client_for(log) as client:
+        healed = client.get("/api/cell/fetch/0").json()
+        untouched = client.get("/api/cell/fetch/1").json()
+    assert healed["status"] == "ok"
+    assert [(a["n"], a["kind"], a["status"]) for a in healed["attempts"]] == [
+        (1, "live", "error"),
+        (2, "retry", "ok"),
+    ]
+    assert [a["latency_ms"] for a in healed["attempts"]] == [1900, 4200]
+    assert len(healed["raw_events"]) == 2
+    # A cell the retry never touched still reports its single live attempt.
+    assert [(a["n"], a["kind"]) for a in untouched["attempts"]] == [(1, "live")]
 
 
 def test_retry_segment_step_start_does_not_shrink_the_total(tmp_path: Path):
@@ -636,11 +740,33 @@ def test_post_retry_rejects_bad_selectors(tmp_path: Path, write_module, body: An
     assert resp.status_code == 400
 
 
+def test_post_retry_rejects_rows_outside_the_run(tmp_path: Path, write_module):
+    """Out-of-range rows are a 400, not a 202 that dies inside the pipeline."""
+    log = _failing_log(tmp_path, num_rows=6)
+    mod, client = _retry_client(log, write_module)
+    with client:
+        for rows in ([6], [-1], [1, 99]):
+            resp = client.post("/api/retry", json={"rows": rows}, headers=ORIGIN)
+            assert resp.status_code == 400, rows
+            assert "out of range 0..5" in resp.json()["detail"]
+        # The valid neighbours of those requests still work.
+        assert (
+            client.post("/api/retry", json={"rows": [5]}, headers=ORIGIN).status_code
+            == 202
+        )
+        _wait_until(lambda: not client.get("/api/run").json()["retry"]["running"])
+    assert len(sys.modules[mod].CALLS) == 1  # the rejects never reached it
+
+
 def test_post_retry_rejects_a_non_json_body(tmp_path: Path, write_module):
     log = _failing_log(tmp_path)
     _mod, client = _retry_client(log, write_module)
     with client:
-        resp = client.post("/api/retry", content=b"not json", headers=ORIGIN)
+        resp = client.post(
+            "/api/retry",
+            content=b"not json",
+            headers={**ORIGIN, "Content-Type": "application/json"},
+        )
     assert resp.status_code == 400
 
 

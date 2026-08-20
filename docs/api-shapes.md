@@ -20,6 +20,14 @@ Cell state fits one byte (also documented in CLAUDE.md):
 | 5 | error |
 | 6 | skipped |
 
+State 4 (retrying) is set for exactly the cells a `retry_start` record lists,
+and holds until each one's own `row_complete` arrives. While a cell is in it,
+it is **not** counted anywhere as settled: it leaves `steps[].done`,
+`stats.errors`, its error group and `rows.done`, and rejoins them with
+whatever its retry produces. States 0 and 1 come from the emitter; the v1 log
+has no per-row start event, so a step in progress leaves its unfinished cells
+pending (0).
+
 ## `GET /api/run`
 
 Full snapshot of the run, including the complete cell-state array.
@@ -28,10 +36,16 @@ Full snapshot of the run, including the complete cell-state array.
 {
   "run": {
     "id": "2026-08-17a",           // run identifier (log-derived)
-    "name": "acme-enrichment",     // pipeline/run name
-    "started_at": "2026-08-17T09:35:12Z",
-    "live": true,                  // log is still being appended
-    "elapsed_s": 401,              // seconds since started_at at snapshot time
+    "name": "acme-enrichment",     // log-derived name (the file's stem)
+    "started_at": "2026-08-17T09:35:12Z",  // string | null: absent or
+                                   // unparseable pipeline_start.started_at
+    "live": true,                  // log was written to in the last few
+                                   // seconds — mtime recency ONLY
+    "elapsed_s": 401,              // live: seconds since started_at.
+                                   // finished: pipeline_end's elapsed_s.
+                                   // interrupted and cold: the log's own
+                                   // span (its last `t`), never a clock
+                                   // that keeps climbing for a dead run
     "schema_v": 1                  // run-log schema version
   },
   "steps": [                       // pipeline order; index = stepIndex in deltas
@@ -50,12 +64,17 @@ Full snapshot of the run, including the complete cell-state array.
   ],
   "rows": { "total": 5000, "done": 3412 },  // done = rows complete through the last step
   "stats": {
-    "spend": 4.83,                 // USD spent so far
+    "spend": 4.83,                 // number | null: USD spent so far, null
+                                   // when nothing in the run could be priced
     "cache_hit_rate": 0.72,        // 0..1
     "errors": 43,                  // total errored cells
-    "throughput_per_min": 248,     // completed cells/min (recent window)
-    "eta_s": 384,                  // estimated seconds remaining; null when unknown
-    "cache_saved": 1.94            // USD saved by cache hits
+    "throughput_per_min": 248,     // number | null: completed cells/min over
+                                   // the recent window. null until the log
+                                   // holds at least 5s, below which the
+                                   // divisor makes the rate meaningless
+    "eta_s": 384,                  // estimated seconds remaining; null when
+                                   // there is no throughput to derive it from
+    "cache_saved": 1.94            // number | null, same rule as spend
   },
   "cells": {
     "encoding": "b64",
@@ -71,8 +90,9 @@ Full snapshot of the run, including the complete cell-state array.
       "count": 38,
       "message": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, ...",
       "rows": [[1211, 1214], [1284, 1284]],  // inclusive row ranges, sorted
-      "first_t": "2026-08-17T09:38:32Z",
-      "last_t": "2026-08-17T09:41:29Z",
+      "first_t": "2026-08-17T09:38:32Z",     // string | null: null when the
+      "last_t": "2026-08-17T09:41:29Z",      // run has no parseable start
+                                             // time to offset log `t` from
       "histogram": [0, 1, 6, 9, ...],        // ~22 equal time buckets first_t..last_t,
                                              // ints, sums to count
       "hint": "All 38 landed in a 3-minute burst — ..."  // string | null
@@ -91,8 +111,9 @@ Full snapshot of the run, including the complete cell-state array.
       "cache_read": 2914220,
       "cache_write": 388051
     },
-    "wasted": 0.13,                // USD spent on cells that ultimately failed
-    "batch_saved": 1.28            // USD saved by batch-mode pricing
+    "wasted": 0.13,                // number | null: USD spent on cells that
+                                   // ultimately failed
+    "batch_saved": 1.28            // number | null: USD saved by batch pricing
   },
   "retry": {
     "available": false,            // POST /api/retry would work
@@ -108,18 +129,35 @@ Full snapshot of the run, including the complete cell-state array.
 retry enabled — including `--data` when the launch used it. When the server
 was launched without `--pipeline` it carries the `<module:attr>` placeholder.
 
+The four dollar figures — `stats.spend`, `stats.cache_saved`, `cost.wasted`,
+`cost.batch_saved` — are `number | null` **together**: a run whose steps have
+no model (function steps) or only unknown models cannot be priced at all, and
+the server reports null rather than a misleading `0`. `cost.by_step` /
+`cost.by_model` then hold only the steps that *could* be priced, and are
+`{}` when none could. Clients must render null as an em-dash, not as blank
+and not as `$0.00`.
+
 Invariants the server must keep:
 
-- `stats.spend == sum(cost.by_step.values()) == sum(cost.by_model.values())`
-  (rounding to cents allowed).
+- **When `stats.spend` is non-null:** `stats.spend ==
+  sum(cost.by_step.values()) == sum(cost.by_model.values())` (rounding to
+  cents allowed). When it is null, both maps are empty and the invariant
+  does not apply.
 - `stats.errors == sum(g.count for g in error_groups) == sum(s.errors for s in steps)`.
 - `cells.rows * cells.steps == len(decoded bytes)`; every byte is `0..6`.
 - `steps` order matches `stepIndex` used by `cells` and SSE deltas.
+- Row indices in the log outside `0..rows.total-1` are ignored, never
+  grown into: a corrupt `row` cannot resize the grid. Without a declared
+  `num_rows`, indices at or above 1,000,000 are treated as corrupt.
 
 ## `GET /api/values?start=A&count=N`
 
 Windowed row values for the data render mode and row labels. `start` is a
-row index, `count` a row count; the server clamps to the log's bounds.
+row index, `count` a row count; the server clamps to the log's bounds **and
+to 1000 rows per request**. A client whose visible window spans more than
+1000 row indices (a sparse filter over a large run) must therefore page —
+asking for the whole span returns a short answer, and re-asking for the same
+over-wide window is a refetch loop, not a retry.
 
 ```jsonc
 {
@@ -162,11 +200,18 @@ One cell's full detail for the inspector.
   "usage": { "in": 1204, "out": 0, "cost": 0.0031 },  // null when nothing was billed
   "elapsed_ms": 26100,             // queued -> terminal; null when not finished
   "queued_at": "2026-08-17T09:41:00Z",  // null when never queued
-  "attempts": [                    // null when no attempt has started
+  "attempts": [                    // null when no attempt has started —
+                                   // pending, skipped, or served from cache.
+                                   // One entry per row_complete the log
+                                   // holds for this cell, in log order, so a
+                                   // healed cell shows its failure AND its
+                                   // retry (capped at the newest 50).
     {
       "n": 1,                      // 1-based attempt number
-      "kind": "live",              // "live" | "retry" | "batch"
-      "at": "2026-08-17T09:41:02Z",
+      "kind": "live",              // "live" | "retry" | "batch": "retry" for
+                                   // records inside a retry_start..retry_end
+                                   // segment, else the step's mode
+      "at": "2026-08-17T09:41:02Z", // string | null (needs a run start time)
       "latency_ms": 1900,
       "status": "error",           // "ok" | "error"
       "backoff_s": 2               // sleep before next attempt; null on the final one
@@ -240,14 +285,25 @@ A `group` selector is resolved against the snapshot's `error_groups` and also
 restricts the retry to that step; `rows` and `all` retry every failed step of
 the rows named.
 
+`Content-Type: application/json` is **required** on every `/api/*` mutation.
+Without it the request would be a CORS "simple request" — no preflight, and
+the launch-token cookie attached automatically — so the server refuses it
+with 415 before the route sees it (`security.py`).
+
+The Origin check compares the **whole origin**, `scheme://host:port`, against
+the server's own. `http://127.0.0.1:7607` and `http://localhost:7607` are the
+same origin as far as it is concerned; `http://127.0.0.1:31337` is a
+different site running on the same loopback interface, and is rejected.
+
 | Status | Body | When |
 |--------|------|------|
 | 202 | `{"accepted": 12}` | Accepted; 12 rows are being retried in the background |
-| 400 | `{"detail": "..."}` | Malformed body, no selector (or more than one), or nothing failed |
-| 401 / 403 | `{"detail": "..."}` | Missing token / non-loopback Origin (see `security.py`) |
+| 400 | `{"detail": "..."}` | Malformed body, no selector (or more than one), a row outside `0..rows.total-1`, or nothing failed |
+| 401 / 403 | `{"detail": "..."}` | Missing token / an Origin that is not this server's (see `security.py`) |
 | 404 | `{"detail": "no error group ..."}` | The named group is not in the index (it may have healed already) |
 | 405 | `{"detail": "Method Not Allowed"}` | Mutations are POST-only |
-| 409 | the `retry` block, `reason` saying why | Retry unavailable, or `"retry already running"` |
+| 409 | the `retry` block, `reason` saying why | Retry unavailable, or `"retry already running"` (the block is read fresh, so `running` is `true` alongside that reason) |
+| 415 | `{"detail": "expected Content-Type: application/json"}` | The body was not declared as JSON |
 
 Only one retry runs at a time. While it does, `/api/run`'s `retry.running` is
 `true`; when the task itself fails (bad checkpoint, pipeline raised), the
@@ -262,12 +318,16 @@ Known run logs, newest first.
 {
   "runs": [
     {
-      "id": "2026-08-17a",
-      "name": "acme-enrichment",
+      "id": "2026-08-17a",         // run id from pipeline_start, else the stem
+      "name": "acme-enrichment",   // log-derived: the file's stem
       "path": ".accrue/runs/2026-08-17a.jsonl",
-      "started_at": "2026-08-17T09:35:12Z",
-      "live": true
+      "started_at": "2026-08-17T09:35:12Z",  // string | null
+      "live": true                 // mtime recency, same rule as run.live
     }
   ]
 }
 ```
+
+`name` and `id` are frequently the same string (a log named after its run).
+Clients should show `name / id` only when they differ, and the id alone
+otherwise.

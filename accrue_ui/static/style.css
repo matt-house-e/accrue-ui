@@ -993,6 +993,8 @@ button:disabled { cursor: not-allowed; }
 }
 .cost-tile .v.green { color: var(--jade-11); }
 .cost-tile .v.red { color: var(--error-text); }
+/* Em-dash for a figure this run cannot supply: present, but not a number. */
+.cost-tile .v.dim { color: var(--faint-2); }
 .token-rows { display: flex; flex-direction: column; gap: 8px; }
 .token-row {
   display: flex;

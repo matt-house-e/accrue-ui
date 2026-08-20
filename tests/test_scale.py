@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from accrue_ui.server.index import RunIndex
+from accrue_ui.server.routes import VALUES_MAX_COUNT
 from accrue_ui.server.tail import Tail
 from tests.conftest import age_file, client_for
 
@@ -151,6 +152,28 @@ def test_api_run_snapshot_latency(scale_log: Path):
         assert set(data) == {2}  # every cell ok
         print(f"/api/run snapshot: {snapshot_s * 1000:.0f}ms")
         assert snapshot_s < SNAPSHOT_BUDGET_S
+
+
+def test_values_windows_page_at_the_server_cap(scale_log: Path):
+    """A window wider than the cap comes back in pages, not silently short.
+
+    The grid asks for values by window; when a sparse filter makes that
+    window span more indices than VALUES_MAX_COUNT the server clamps, so
+    the client has to page rather than re-ask for the same over-wide window
+    forever (the ~6Hz refetch loop).
+    """
+    with client_for(scale_log) as client:
+        first = client.get("/api/values?start=0&count=5000").json()
+        second = client.get(f"/api/values?start={VALUES_MAX_COUNT}&count=5000").json()
+    assert len(first["rows"]) == VALUES_MAX_COUNT
+    assert [r["row"] for r in first["rows"][:2]] == [0, 1]
+    assert second["start"] == VALUES_MAX_COUNT
+    assert [r["row"] for r in second["rows"][:2]] == [
+        VALUES_MAX_COUNT,
+        VALUES_MAX_COUNT + 1,
+    ]
+    # Two pages, no gap and no overlap.
+    assert first["rows"][-1]["row"] + 1 == second["rows"][0]["row"]
 
 
 def test_values_window_mid_range(scale_log: Path):

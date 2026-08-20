@@ -43,7 +43,10 @@ asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
+# Only the package ships. tools/ holds the DEV-ONLY, auth-free devstub
+# (tools/devstub.py) — it must never reach a wheel.
 include = ["accrue_ui*"]
+exclude = ["tools*", "tests*", "docs*"]
 
 [tool.setuptools.package-data]
 accrue_ui = ["static/**"]

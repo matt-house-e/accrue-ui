@@ -101,6 +101,49 @@ def test_replacement_reopens_new_inode(tmp_path: Path):
     tail.close()
 
 
+def test_truncate_and_regrow_past_the_read_position_reopens(tmp_path: Path):
+    """A new run written over the same path, in place, and already longer.
+
+    Same inode, and the size never dips below what we had consumed, so
+    neither the inode check nor the size check sees it: the follower used to
+    resume mid-file and splice the new run's records onto the old index.
+    The head-bytes signature is what catches it.
+    """
+    path = tmp_path / "log.jsonl"
+    lines = _lines(RECORDS)
+    path.write_bytes(lines[0] + lines[1])
+    tail = Tail(path)
+    assert len(tail.read_available()) == 2
+    assert tail.generation == 0
+    consumed = len(lines[0] + lines[1])
+
+    second_run = [{**RECORDS[0], "run_id": "second-run"}, *RECORDS[1:]]
+    blob = b"".join(_lines(second_run))
+    assert len(blob) > consumed  # the size check cannot see this
+    path.write_bytes(blob)
+    assert path.stat().st_ino  # (same inode: write_bytes truncates in place)
+
+    got = tail.read_available()
+    assert tail.generation == 1
+    assert [r.data for r in got] == second_run  # from the start, not spliced
+    assert got[0].offset == 0
+    tail.close()
+
+
+def test_growing_from_an_empty_file_is_not_a_new_generation(tmp_path: Path):
+    """The head signature starts short; growing past it is the same file."""
+    path = tmp_path / "log.jsonl"
+    path.write_bytes(b"")
+    tail = Tail(path)
+    assert tail.read_available() == []
+    for line in _lines(RECORDS):
+        with open(path, "ab") as f:
+            f.write(line)
+        tail.read_available()
+    assert tail.generation == 0
+    tail.close()
+
+
 def test_missing_file_yields_nothing_then_recovers(tmp_path: Path):
     path = tmp_path / "log.jsonl"
     tail = Tail(path)

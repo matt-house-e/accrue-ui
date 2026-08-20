@@ -39,19 +39,36 @@ Backend lives in `accrue_ui/server/`:
   - `GET /api/runs` — list known run logs
 - **`tail.py`** — poll follower: `stat` every ~250ms + read appended bytes,
   partial-line safe. Polling on purpose — **no inotify, it breaks on WSL2**.
+  Identity is inode **plus the first 64 bytes**, re-checked every poll: a log
+  truncated and rewritten past the read position keeps its inode and never
+  looks smaller, and splicing two runs together corrupts the index.
 - **`index.py`** — in-memory run index built from the log → snapshot + deltas.
   Cell state fits one byte: `0` pending, `1` running, `2` ok, `3` cached,
   `4` retrying, `5` error, `6` skipped. A retry segment re-delivers
   `row_complete` for the cells it heals: the old terminal state is unwound
   (counters, error groups) before the new one lands, so a healed row leaves
-  its group and an emptied group disappears.
+  its group and an emptied group disappears. `retry_start` names the cells a
+  retry is about to re-run — they go to `4` and leave every settled tally
+  until their own `row_complete` arrives. Row indices past the declared
+  `num_rows` (or past 1,000,000 without one) are ignored, not grown into.
+  **`live` is mtime recency only** — an interrupted run has no `pipeline_end`
+  and must not pulse LIVE forever.
 - **`events.py`** — SSE delta fan-out. Drop-and-coalesce: each client holds
   one mergeable pending payload (state, not a journal), flushed ≤10Hz.
 - **`retry.py`** — retry orchestration: imports `--pipeline`/`--data` once at
   startup (failures become the `retry.reason` the UI shows), and runs one
   `retry_failed_async()` at a time, appending to the log being served.
 - **`security.py`** — bind `127.0.0.1` only, launch token, Origin/Host
-  checks, mutations POST-only.
+  checks, mutations POST-only **and JSON-only** (a `text/plain` body would be
+  a no-preflight simple request). The Origin check compares the whole origin,
+  `scheme://host:port`, against the server's own — loopback is not one
+  origin, and a page on another local port must not ride the cookie. The CLI
+  binds the port **before** printing the tokenized URL, so a port squatter
+  cannot receive the launch token.
+
+`tools/devstub.py` (fixture-serving dev stub) lives outside the package on
+purpose: it has no auth at all and must never ship in the wheel. Run it with
+`python tools/devstub.py`.
 
 ## Frontend rules
 
