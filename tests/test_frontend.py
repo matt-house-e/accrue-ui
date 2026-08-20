@@ -30,6 +30,7 @@ STATIC_FILES = [
     "lib/icons.js",
     "lib/store.js",
     "lib/sse.js",
+    "lib/tooltip.js",
     "views/grid.js",
     "views/inspector.js",
     "views/triage.js",
@@ -432,6 +433,52 @@ def test_cost_bars_match_the_approved_design():
     value = css.split(".bar-row .bar-value {", 1)[1].split("}", 1)[0]
     assert "var(--font-mono)" in value
     assert "text-align: right" in value
+
+
+def test_tooltip_floats_into_a_body_portal_that_escapes_overflow():
+    """The CSS-only ::after tooltip was clipped by overflow ancestors and had
+    no viewport-edge handling; it is replaced by one floating node portaled to
+    <body> (lib/tooltip.js), positioned fixed and stacked above the inspector.
+    """
+    css = (STATIC / "style.css").read_text()
+    # The clipped CSS-only painting is gone …
+    assert ".tip::after" not in css
+    assert ".tip::before" not in css
+    # … replaced by a floating layer, styled from the :root tokens only.
+    assert ".tip-floating" in css
+    block = css.split(".tip-floating {", 1)[1].split("}", 1)[0]
+    assert "position: fixed" in block  # no overflow ancestor can clip a fixed node
+    assert "var(--hover)" in block and "var(--border-2)" in block
+    assert "var(--ink)" in block
+    assert "#" not in block  # no literal colors outside the :root token table
+    z = int(block.split("z-index:", 1)[1].split(";", 1)[0].split("/", 1)[0].strip())
+    assert z > 90  # above .inspector (z-index: 90) and its scrim (80)
+    # The dotted-underline affordance stays on the trigger label.
+    assert ".tip-label" in css
+    label = css.split(".tip-label {", 1)[1].split("}", 1)[0]
+    assert "border-bottom: 1px dotted" in label
+
+
+def test_tooltip_module_delegates_and_handles_collisions():
+    """One shared node, delegated events (so Preact re-renders need no
+    re-binding), edge-flip/clamp geometry, and dismissal on scroll/resize."""
+    tip = (STATIC / "lib" / "tooltip.js").read_text()
+    assert "export function initTooltips" in tip
+    assert "document.body.appendChild" in tip  # the body portal
+    assert "getBoundingClientRect" in tip  # geometry from the trigger's rect
+    assert "position: fixed" not in tip  # visual style lives in CSS, not JS
+    # Delegation on document for both pointer and keyboard.
+    for event in ("mouseover", "mouseout", "focusin", "focusout"):
+        assert event in tip, event
+    # Collision handling: flip on bottom overflow, clamp to the viewport.
+    assert "innerHeight" in tip
+    assert "innerWidth" in tip
+    # A stale tooltip never floats over the wrong place.
+    assert '"scroll"' in tip and '"resize"' in tip
+    # Wired exactly once from the app entry.
+    app_js = (STATIC / "app.js").read_text()
+    assert "initTooltips" in app_js
+    assert "lib/tooltip.js" in app_js
 
 
 def test_retry_note_uses_existing_error_tokens():
