@@ -95,9 +95,45 @@ def test_first_drain_primes_stats_then_none():
         "throughput_per_min",
         "eta_s",
         "cache_saved",
+        "rows_done",  # delta-only mirror of the snapshot's rows.done
     }
     # ...and with no changes since, the next drain has nothing to say.
     assert index.drain_delta() is None
+
+
+def test_drain_reports_rows_done_as_rows_complete():
+    """rows_done tracks rows finished through the LAST step, not cells."""
+    index = _index_for(_start_records(num_rows=3))
+    index.apply(
+        TailRecord(
+            0,
+            1,
+            {
+                "v": 1,
+                "t": 0.2,
+                "type": "step_start",
+                "step": "score",
+                "level": 1,
+                "mode": "realtime",
+                "num_rows": 3,
+            },
+        )
+    )
+    index.drain_delta()  # prime the baseline
+
+    index.apply(TailRecord(0, 1, row("fetch", 0, 1.0)))
+    assert index.drain_delta()["stats"].get("rows_done") is None  # 1 of 2 steps
+
+    index.apply(TailRecord(0, 1, row("score", 0, 1.1)))
+    delta = index.drain_delta()
+    assert delta["stats"]["rows_done"] == 1
+    assert index.snapshot()["rows"] == {"total": 3, "done": 1}
+
+    index.apply(TailRecord(0, 1, row("fetch", 1, 1.2)))
+    index.apply(TailRecord(0, 1, row("score", 1, 1.3)))
+    delta = index.drain_delta()
+    assert delta["stats"]["rows_done"] == 2
+    assert index.snapshot()["rows"]["done"] == 2
 
 
 def test_drain_coalesces_to_latest_cell_state():

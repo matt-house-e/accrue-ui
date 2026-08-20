@@ -1,11 +1,16 @@
 """Command-line entry point for accrue-ui.
 
-``accrue-ui [run_log] [--pipeline mod:attr] [--port 7607] [--no-browser]``
-resolves the run log (explicit path, else the newest ``*.jsonl`` under
-``./.accrue/runs``), generates a fresh URL-safe launch token, builds the
-server app, prints the tokenized URL, opens the browser, and serves with
-uvicorn bound to **127.0.0.1 only** — hardcoded, no flag to widen it (see
-``server/security.py`` for the threat model).
+``accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--port 7607]
+[--no-browser]`` resolves the run log (explicit path, else the newest
+``*.jsonl`` under ``./.accrue/runs``), generates a fresh URL-safe launch
+token, builds the server app, prints the tokenized URL, opens the browser,
+and serves with uvicorn bound to **127.0.0.1 only** — hardcoded, no flag to
+widen it (see ``server/security.py`` for the threat model).
+
+``--pipeline`` (plus ``--data`` when it names a Pipeline rather than a
+factory) is what makes retry possible; see ``server/retry.py`` for the
+accepted shapes. Run the command from the directory the pipeline itself ran
+in — the one holding ``.accrue/`` — so the retry finds the same checkpoint.
 """
 
 from __future__ import annotations
@@ -42,7 +47,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pipeline",
         default=None,
-        help="Import path to the pipeline object (module:attr), required for retry.",
+        help=(
+            "Import path (module:attr) to the Pipeline, or to a zero-arg "
+            "callable returning (pipeline, data). Required for retry."
+        ),
+    )
+    parser.add_argument(
+        "--data",
+        default=None,
+        help=(
+            "Import path (module:attr) to the run's input rows — a DataFrame, "
+            "a list of dicts, or a zero-arg callable returning one. Required "
+            "when --pipeline names a Pipeline instance."
+        ),
     )
     parser.add_argument(
         "--port",
@@ -97,10 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         run_log = found
 
     token = secrets.token_urlsafe(32)
-    app = create_app(run_log, token=token)
-    # Accepted now, wired up in issue #4 (retry); until then POST /api/retry
-    # keeps answering 409.
-    app.state.pipeline = args.pipeline
+    # The specs are imported during app startup, not here: a bad --pipeline
+    # is reported in the UI (retry.reason) rather than killing the server.
+    app = create_app(run_log, token=token, pipeline=args.pipeline, data=args.data)
 
     url = f"http://{HOST}:{args.port}/?token={token}"
     print(f"→ {url}", flush=True)

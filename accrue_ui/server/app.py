@@ -1,10 +1,15 @@
 """FastAPI app factory.
 
-``create_app(run_path, *, token, allow_origin=None)`` builds the whole read
-path: security middleware, the API routes, a background follower that keeps
-the shared RunIndex current, a coalescer that flushes SSE deltas at most
-every 100ms, and the static frontend mounted at ``/`` (after the API routes,
-so ``/api/*`` always wins).
+``create_app(run_path, *, token, allow_origin=None, pipeline=None, data=None)``
+builds the whole read path: security middleware, the API routes, a background
+follower that keeps the shared RunIndex current, a coalescer that flushes SSE
+deltas at most every 100ms, and the static frontend mounted at ``/`` (after
+the API routes, so ``/api/*`` always wins).
+
+``pipeline`` / ``data`` are the ``module:attr`` specs from the CLI. They are
+imported once during startup (see ``retry.py``); whatever happens — success
+or a precise failure reason — lands in ``/api/run``'s ``retry`` block, and
+the resolved objects are what ``POST /api/retry`` runs.
 
 Binding the server socket to 127.0.0.1 is the runner's job (``cli.py``);
 everything here assumes loopback-only exposure — see ``security.py``.
@@ -22,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .events import FLUSH_INTERVAL_S, DeltaBroadcaster
 from .index import RunIndex
+from .retry import RetryController
 from .routes import router
 from .security import install_security
 from .tail import Tail
@@ -42,7 +48,7 @@ async def _follow(app: FastAPI) -> None:
             # marks everything dirty again, so connected SSE clients converge
             # on the new file's state at the next flush.
             generation = tail.generation
-            app.state.index = RunIndex(app.state.run_path)
+            app.state.index = RunIndex(app.state.run_path, retry=app.state.retry)
         for record in records:
             app.state.index.apply(record)
         if not records:
@@ -68,14 +74,20 @@ def create_app(
     *,
     token: str,
     allow_origin: str | None = None,
+    pipeline: str | None = None,
+    data: str | None = None,
 ) -> FastAPI:
     """Build the accrue-ui server app for one run log."""
     run_path = Path(run_path)
+    retry = RetryController(run_path, pipeline, data)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         tail = Tail(run_path)
-        index = RunIndex(run_path)
+        # Import --pipeline/--data now so the first snapshot already knows
+        # whether retry is on the table, and why not when it isn't.
+        retry.resolve()
+        index = RunIndex(run_path, retry=retry)
         for record in tail.read_available():
             index.apply(record)
         # The initial backfill is the snapshot, not a delta: drain it away so
@@ -92,6 +104,7 @@ def create_app(
         try:
             yield
         finally:
+            await retry.aclose()
             for task in tasks:
                 task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -99,6 +112,9 @@ def create_app(
             tail.close()
 
     app = FastAPI(title="accrue-ui", lifespan=lifespan, openapi_url=None)
+    # Set before startup so a caller can inspect the retry specs (and the
+    # reason they failed to import) without running the lifespan.
+    app.state.retry = retry
     install_security(app, token=token, allow_origin=allow_origin)
     app.include_router(router)
     # Static frontend mounts last so /api/* is matched first.

@@ -3,7 +3,7 @@ import { useState } from "preact/hooks";
 import { html } from "../lib/html.js";
 import { IconBulb } from "../lib/icons.js";
 import { fmtClock, fmtInt, fmtMoney } from "../lib/fmt.js";
-import { snapshot } from "../lib/store.js";
+import { postRetry, retryBusy, retryError, snapshot } from "../lib/store.js";
 
 function rangeLabel(rows) {
   if (!rows || !rows.length) return "";
@@ -24,19 +24,35 @@ function Histogram({ buckets }) {
   </div>`;
 }
 
-function RetryButton({ group, retry, primary = false }) {
+// Inline failure notice: quiet red, next to the button that asked.
+export function RetryNote({ source }) {
+  const err = retryError.value;
+  if (!err || (err.source !== source && err.source !== "*")) return null;
+  return html`<span class="retry-note mono">${err.message}</span>`;
+}
+
+function RetryButton({ count, retry, body, source, primary = false }) {
+  const busy = retryBusy();
   const label = primary
-    ? `Retry all ${fmtInt(group)} failed rows`
-    : `Retry ${fmtInt(group)} rows`;
+    ? `Retry all ${fmtInt(count)} failed rows`
+    : `Retry ${fmtInt(count)} rows`;
   const btn = html`<button
     class=${`btn ${primary ? "btn-primary" : "btn-secondary"}`}
-    disabled=${!retry.available}
-    onClick=${(e) => e.stopPropagation()}
+    disabled=${!retry.available || busy}
+    onClick=${(e) => {
+      e.stopPropagation();
+      postRetry(body, source);
+    }}
   >
-    ${label}
+    ${busy ? "Retrying…" : label}
   </button>`;
-  if (retry.available) return btn;
-  return html`<span class="tip" data-tip=${retry.reason} style=${primary ? { marginLeft: "auto" } : { marginLeft: "auto", flex: "none" }}>
+  const wrap = primary
+    ? { marginLeft: "auto" }
+    : { marginLeft: "auto", flex: "none" };
+  if (retry.available) {
+    return html`<span style=${wrap}><${RetryNote} source=${source} />${btn}</span>`;
+  }
+  return html`<span class="tip" data-tip=${retry.reason} style=${wrap}>
     ${btn}
   </span>`;
 }
@@ -53,7 +69,12 @@ function GroupCard({ group, expanded, onToggle, retry }) {
           last ${fmtClock(group.last_t, false)}
         </div>
       </span>
-      <${RetryButton} group=${group.count} retry=${retry} />
+      <${RetryButton}
+        count=${group.count}
+        retry=${retry}
+        body=${{ group: { step: group.step, type: group.type } }}
+        source=${`${group.step}:${group.type}`}
+      />
     </button>
     ${expanded &&
     html`<div class="group-body">
@@ -123,7 +144,13 @@ export function Triage() {
         Resume re-runs only failed cells — cache intact · est${" "}
         <span class="mono">${fmtMoney(Math.max(est, 0.01))}</span>
       </span>
-      <${RetryButton} group=${totalFailed} retry=${retry} primary=${true} />
+      <${RetryButton}
+        count=${totalFailed}
+        retry=${retry}
+        body=${{ all: true }}
+        source="all"
+        primary=${true}
+      />
     </div>
   </div>`;
 }

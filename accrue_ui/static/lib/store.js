@@ -38,6 +38,8 @@ export const sseStatus = signal("idle"); // 'idle' | 'connected'
 export const cellDetail = signal(null); // /api/cell payload for selection
 export const cellDetailLoading = signal(false);
 export const elapsedS = signal(0); // ticks locally while run.live
+export const retryPending = signal(false); // POST in flight, before the poll
+export const retryError = signal(null); // {source, message} | null, shown inline
 
 // Row-values cache: rowIndex -> {row, key, cells}. Insertion-ordered Map
 // gives us LRU-ish eviction at the cap.
@@ -68,6 +70,14 @@ export function stateAt(row, stepIndex) {
 export function stepFields(step) {
   const fields = step.fields || [];
   return showInternalFields.value ? fields : fields.filter((f) => !f.startsWith("__"));
+}
+
+// Is a retry in flight? True from the moment we POST until the server stops
+// reporting retry.running, so every retry button disables together.
+export function retryBusy() {
+  if (retryPending.value) return true;
+  const snap = snapshot.value;
+  return !!(snap && snap.retry && snap.retry.running);
 }
 
 // Error-group lookup for a (step, row): returns the group or null.
@@ -154,6 +164,73 @@ export async function loadRuns() {
   }
 }
 
+// ---- retry --------------------------------------------------------------
+//
+// POST /api/retry is same-origin, so the HttpOnly launch-token cookie rides
+// along automatically — no token header to attach. The server answers 202
+// and runs the retry in the background; we poll /api/run until it reports
+// retry.running false, which is also what refreshes error_groups as rows
+// heal (deltas carry cell states, not groups).
+
+const RETRY_POLL_MS = 1000;
+let retryPoll = null;
+
+function pollUntilRetryDone() {
+  if (retryPoll) return;
+  retryPoll = setInterval(async () => {
+    try {
+      await loadRun();
+    } catch {
+      // transient: keep polling, the next tick may succeed
+    }
+    const snap = snapshot.value;
+    if (snap && snap.retry && snap.retry.running) return;
+    clearInterval(retryPoll);
+    retryPoll = null;
+    retryPending.value = false;
+    if (snap && snap.retry && snap.retry.last_error) {
+      retryError.value = { source: "*", message: snap.retry.last_error };
+    }
+    const sel = selection.value; // the open cell may have healed
+    if (sel) loadCell(sel.step, sel.row);
+  }, RETRY_POLL_MS);
+}
+
+// body: {rows:[...]} | {group:{step,type}} | {all:true}. `source` tags which
+// button asked, so the error renders next to that one.
+export async function postRetry(body, source) {
+  if (retryBusy()) return false;
+  retryPending.value = true;
+  retryError.value = null;
+  let res;
+  try {
+    res = await fetch("/api/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    retryPending.value = false;
+    retryError.value = { source, message: String(e) };
+    return false;
+  }
+  if (!res.ok) {
+    let message = `retry failed (${res.status})`;
+    try {
+      const payload = await res.json();
+      message = payload.reason || payload.detail || message;
+    } catch {
+      // non-JSON error body: keep the status-code message
+    }
+    retryPending.value = false;
+    retryError.value = { source, message };
+    return false;
+  }
+  await loadRun().catch(() => {});
+  pollUntilRetryDone();
+  return true;
+}
+
 // ---- actions ------------------------------------------------------------
 
 export function select(stepName, row) {
@@ -194,7 +271,16 @@ export function applyDelta(delta) {
       cellsVersion.value++;
     }
     if (snap && delta.stats && Object.keys(delta.stats).length) {
-      snapshot.value = { ...snapshot.value, stats: { ...snap.stats, ...delta.stats } };
+      // rows_done is the one delta-only stats key: it belongs to rows.done
+      // in the snapshot (docs/api-shapes.md, GET /api/events).
+      const { rows_done: rowsDone, ...stats } = delta.stats;
+      snapshot.value = { ...snapshot.value, stats: { ...snap.stats, ...stats } };
+      if (typeof rowsDone === "number") {
+        snapshot.value = {
+          ...snapshot.value,
+          rows: { ...snapshot.value.rows, done: rowsDone },
+        };
+      }
     }
     if (snap && Array.isArray(delta.steps) && delta.steps.length) {
       const byName = new Map(delta.steps.map((s) => [s.name, s]));

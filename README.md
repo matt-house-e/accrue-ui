@@ -8,6 +8,25 @@ accrue emits.
 **Status: under construction** — built issue-by-issue, see
 [the issues](https://github.com/matt-house-e/accrue-ui/issues).
 
+## Retrying failed rows
+
+Point the dashboard at the pipeline that produced the run and the triage
+tab's retry buttons go live — one click re-runs just the failed cells
+(everything else is served from the run's checkpoint) and the grid heals in
+place:
+
+```bash
+# attr is a zero-arg callable returning (pipeline, data)
+accrue-ui .accrue/runs/2026-08-20a.jsonl --pipeline enrich:target
+
+# ...or the Pipeline itself, with the data alongside it
+accrue-ui .accrue/runs/2026-08-20a.jsonl --pipeline enrich:pipeline --data enrich:rows
+```
+
+Run it from the same directory the pipeline ran in, so the retry resolves
+the same checkpoint. Without `--pipeline` the buttons stay disabled and say
+why.
+
 ## Development
 
 ```bash

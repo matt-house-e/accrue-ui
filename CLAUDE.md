@@ -14,8 +14,15 @@ derived from the log (plus the small retry surface below).
 pip install -e ".[dev]"   # Dev install
 pytest                    # Run tests
 ruff check .              # Lint (CI enforces both)
-accrue-ui [run_log] [--pipeline mod:attr] [--port 7607] [--no-browser]
+accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--port 7607] [--no-browser]
 ```
+
+`--pipeline` names either a `Pipeline` (then `--data` is required: a
+DataFrame, a `list[dict]`, or a zero-arg callable returning one) or a
+zero-arg callable returning `(pipeline, data)` — optionally
+`(pipeline, data, config)` when the run used a custom `EnrichmentConfig`.
+Launch from the directory the run itself used, so the retry finds the same
+checkpoint.
 
 ## Architecture
 
@@ -27,16 +34,22 @@ Backend lives in `accrue_ui/server/`:
   - `GET /api/cell/{step}/{row}` — one cell's detail (prompt, response, error, cost)
   - `GET /api/values?start=A&count=N` — windowed row values
   - `GET /api/events` — SSE stream of coalesced deltas, ≤10Hz
-  - `POST /api/retry` — retry failed rows (requires `--pipeline`)
+  - `POST /api/retry` — retry failed rows: `{rows}`, `{group}` or `{all}`
+    (requires `--pipeline`; 409 otherwise, and while one is already running)
   - `GET /api/runs` — list known run logs
 - **`tail.py`** — poll follower: `stat` every ~250ms + read appended bytes,
   partial-line safe. Polling on purpose — **no inotify, it breaks on WSL2**.
 - **`index.py`** — in-memory run index built from the log → snapshot + deltas.
   Cell state fits one byte: `0` pending, `1` running, `2` ok, `3` cached,
-  `4` retrying, `5` error, `6` skipped.
+  `4` retrying, `5` error, `6` skipped. A retry segment re-delivers
+  `row_complete` for the cells it heals: the old terminal state is unwound
+  (counters, error groups) before the new one lands, so a healed row leaves
+  its group and an emptied group disappears.
 - **`events.py`** — SSE delta fan-out. Drop-and-coalesce: each client holds
   one mergeable pending payload (state, not a journal), flushed ≤10Hz.
-- **`retry.py`** — retry orchestration.
+- **`retry.py`** — retry orchestration: imports `--pipeline`/`--data` once at
+  startup (failures become the `retry.reason` the UI shows), and runs one
+  `retry_failed_async()` at a time, appending to the log being served.
 - **`security.py`** — bind `127.0.0.1` only, launch token, Origin/Host
   checks, mutations POST-only.
 
