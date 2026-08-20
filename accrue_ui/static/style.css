@@ -86,56 +86,45 @@ button:disabled { cursor: not-allowed; }
   .pulse { animation: none; }
 }
 
-/* ---------- tooltips (dotted underline = hover tooltip) ---------- */
+/* ---------- tooltips (dotted underline = hover tooltip) ----------
+   The tooltip element is portaled to <body> by lib/tooltip.js (one shared
+   node, positioned via event delegation), so it escapes every overflow /
+   stacking ancestor that clipped the old CSS-only ::after tooltip — the grid
+   scroller, the inspector slide-over, the app shell — and is kept inside the
+   viewport. This block styles the affordance and that floating node; its
+   geometry (top/left, above/below) is set in JS. */
 
-.tip {
-  position: relative;
-}
 .tip-label {
   border-bottom: 1px dotted var(--faint-2);
   cursor: help;
 }
-.tip::after {
-  content: attr(data-tip);
-  position: absolute;
-  bottom: calc(100% + 9px);
-  left: 50%;
-  transform: translateX(-50%);
+.tip-floating {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100; /* above the inspector slide-over (90) and its scrim (80) */
+  max-width: 260px;
+  padding: 6px 10px;
   background: var(--hover);
   border: 1px solid var(--border-2);
+  border-radius: 8px;
   color: var(--ink);
-  font: 400 11px/1.5 var(--font-sans);
-  padding: 6px 10px;
-  border-radius: 6px;
-  width: max-content;
-  max-width: 264px;
+  font: 400 11.5px/1.5 var(--font-sans);
   white-space: pre-line;
   text-align: left;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.12s;
-  z-index: 60;
+  transition: opacity 0.12s ease;
 }
-.tip::before { /* caret */
-  content: "";
-  position: absolute;
-  bottom: calc(100% + 5px);
-  left: 50%;
-  transform: translateX(-50%) rotate(45deg);
-  width: 8px;
-  height: 8px;
-  background: var(--hover);
-  border-right: 1px solid var(--border-2);
-  border-bottom: 1px solid var(--border-2);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s;
-  z-index: 61;
+.tip-floating.is-visible {
+  opacity: 1;
+  visibility: visible;
 }
-.tip:hover::after,
-.tip:hover::before,
-.tip:focus-visible::after,
-.tip:focus-visible::before { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .tip-floating { transition: none; }
+}
 
 /* ---------- top bar ---------- */
 

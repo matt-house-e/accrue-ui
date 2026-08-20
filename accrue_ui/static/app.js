@@ -5,6 +5,7 @@ import { html } from "./lib/html.js";
 import { IconChevronDown, IconSearch } from "./lib/icons.js";
 import { fmtDuration, fmtInt, fmtMoney, fmtPct } from "./lib/fmt.js";
 import { connect } from "./lib/sse.js";
+import { initTooltips } from "./lib/tooltip.js";
 import {
   activeTab,
   closeInspector,
@@ -290,5 +291,8 @@ function App() {
     ${selection.value && html`<${Inspector} />`}
   </div>`;
 }
+
+// One global init activates `[data-tip]` tooltip delegation for the whole app.
+initTooltips();
 
 render(html`<${App} />`, document.getElementById("app"));
