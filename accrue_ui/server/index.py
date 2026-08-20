@@ -60,6 +60,11 @@ THROUGHPUT_MIN_WINDOW_S = 5.0
 ROW_INDEX_CAP = 1_000_000
 #: Raw records kept per cell (newest first out of the log, oldest dropped).
 MAX_CELL_EVENTS = 50
+#: Ceiling on a single prompt/response body read out of the sidecar. A body is
+#: one LLM exchange; a length past this is a corrupt or hostile ``prompt_ref``,
+#: not a body, and reading it whole is exactly the memory blow-up the
+#: seek-by-offset design exists to avoid.
+MAX_PROMPT_BODY_BYTES = 16 * 1024 * 1024
 SCHEMA_V = 1
 
 
@@ -79,6 +84,11 @@ class Cell:
     #: from_a_retry_segment). The bytes are re-read on demand; the flag is
     #: what makes the inspector's attempt list say "retry".
     events: list[tuple[int, int, bool]] = field(default_factory=list)
+    #: One (offset, length) per row_attempt record for this cell, in log order
+    #: (== attempt order within a pass). Like ``events``, the bytes stay on
+    #: disk and are re-read on demand — the sidecar prompt_ref each one carries
+    #: is resolved only when the inspector opens the cell.
+    attempt_events: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -153,6 +163,11 @@ class RunIndex:
 
     def __init__(self, path: str | Path, retry: RetryController | None = None):
         self.path = Path(path)
+        #: Prompt sidecar beside the run log — ``<run>.prompts.jsonl``, the same
+        #: rule accrue's ``prompt_sidecar_path`` uses. Present only when the run
+        #: captured bodies (``capture="prompts"``/``"full"``); ``/api/cell``
+        #: seeks into it by offset and never reads it whole.
+        self._sidecar_path = self.path.with_suffix(".prompts.jsonl")
         #: Retry orchestration for this run (``POST /api/retry``); a bare
         #: controller with no ``--pipeline`` simply reports unavailable.
         self.retry = retry if retry is not None else RetryController(path)
@@ -277,6 +292,8 @@ class RunIndex:
             self._apply_pipeline_start(data)
         elif rtype == "step_start":
             self._apply_step_start(data)
+        elif rtype == "row_attempt":
+            self._apply_row_attempt(record)
         elif rtype == "row_complete":
             self._apply_row_complete(record)
         elif rtype == "step_end":
@@ -373,6 +390,51 @@ class RunIndex:
         if self._row_terminal[row] == len(self._steps):
             self._rows_done -= 1
         self._row_terminal[row] -= 1
+
+    def _apply_row_attempt(self, record: TailRecord) -> None:
+        """Record one api/parse attempt; drive the retrying state from a real one.
+
+        The v0.2 log emits a ``row_attempt`` per try, each with its own
+        ``kind`` (``api``/``parse``), status and — at ``capture>=prompts`` — a
+        ``prompt_ref`` into the sidecar. Only the (offset, length) is kept; the
+        body and even the attempt fields are re-read on demand in
+        :meth:`cell_detail`, so a million-row run holds offsets, not prompts.
+
+        A non-``ok`` attempt is the retry signal P22 asks for: the cell has
+        failed a try and another one (or a terminal ``row_complete``) is
+        coming, so it shows as RETRYING in the interim instead of sitting at
+        pending. Only a cell that is not already settled is flipped — a
+        ``retry_start`` segment marks RETRYING and unwinds the prior terminal
+        itself, so touching a terminal cell here would double-unwind it.
+        """
+        data = record.data
+        name = data.get("step")
+        row = data.get("row")
+        if not isinstance(name, str) or not isinstance(row, int) or row < 0:
+            return
+        if row >= self._row_limit:
+            return
+        step = self._step(name)
+        self._ensure_dims(row=row)
+        idx = self._step_idx[name]
+
+        cell = step.cells.get(row)
+        if cell is None:
+            cell = Cell()
+            step.cells[row] = cell
+        cell.attempt_events.append((record.offset, record.length))
+        if len(cell.attempt_events) > MAX_CELL_EVENTS:
+            del cell.attempt_events[:-MAX_CELL_EVENTS]
+
+        status = data.get("status")
+        if status is not None and status != "ok":
+            pos = row * len(self._steps) + idx
+            if self._cells[pos] not in TERMINAL:
+                # Only the cell state moves — no step counter changes when a
+                # cell goes pending -> retrying, so the step stays out of the
+                # delta (its done/errors are unchanged).
+                self._cells[pos] = RETRYING
+                self._dirty_cells[(row, idx)] = RETRYING
 
     def _apply_row_complete(self, record: TailRecord) -> None:
         data = record.data
@@ -872,10 +934,19 @@ class RunIndex:
                 "cost": round(cost, 6) if cost is not None else None,
             }
 
-        records = self._read_events(cell.events) if cell else []
-        attempts = None
-        if cell is not None and records and not cell.from_cache:
-            attempts = self._attempts(step, state, records)
+        completions, attempt_recs, raw_events = self._read_cell_records(cell)
+
+        # Real per-attempt timeline when the log carries row_attempt records
+        # (v0.2); otherwise synthesize one attempt per row_complete (v0.1 logs,
+        # which have no row_attempt — the pinned run_small fixture is one).
+        prompt = None
+        if attempt_recs:
+            attempts = self._attempts_from_records(attempt_recs)
+            prompt = self._resolve_prompt(attempt_recs)
+        elif completions and cell is not None and not cell.from_cache:
+            attempts = self._attempts(step, state, completions)
+        else:
+            attempts = None
 
         return {
             "step": step_name,
@@ -889,8 +960,14 @@ class RunIndex:
             # The v1 log has no queue timestamps; a future emitter may add them.
             "queued_at": None,
             "attempts": attempts,
+            # Captured request/response body for this cell's last body-bearing
+            # attempt, or null. capture_available says which empty state the
+            # inspector shows: a real "no capture on this run" hint vs. a cell
+            # that simply had no body (a pure api error).
+            "prompt": prompt,
+            "capture_available": self._sidecar_path.exists(),
             "values": cell.values if cell and state in (OK, CACHED) else None,
-            "raw_events": [record for record, _retry in records],
+            "raw_events": raw_events,
         }
 
     def _attempts(
@@ -929,29 +1006,127 @@ class RunIndex:
             )
         return attempts
 
-    def _read_events(
-        self, events: list[tuple[int, int, bool]]
-    ) -> list[tuple[dict[str, Any], bool]]:
-        """Re-read raw records from the log by offset; nothing cached in RAM.
+    def _read_cell_records(
+        self, cell: Cell | None
+    ) -> tuple[
+        list[tuple[dict[str, Any], bool]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        """Re-read every raw record for a cell from the log in one pass, by offset.
 
-        Each pairs with the flag saying whether it came from a retry
-        segment, so one file read serves both ``raw_events`` and the
-        attempt list.
+        Nothing is cached in RAM — only the byte spans are, so this seeks each
+        line back out on demand. Returns ``(completions, attempts, raw_events)``:
+        completions pair each ``row_complete`` with its retry-segment flag (the
+        v0.1 fallback attempt list needs it), attempts are the ``row_attempt``
+        records, and raw_events is every record for the cell in log order (by
+        offset) — the verbatim JSONL the inspector's Raw tab shows.
         """
-        out: list[tuple[dict[str, Any], bool]] = []
-        if not events:
-            return out
+        completions: list[tuple[dict[str, Any], bool]] = []
+        attempts: list[dict[str, Any]] = []
+        raw_events: list[dict[str, Any]] = []
+        if cell is None:
+            return completions, attempts, raw_events
+        # (offset, length, is_row_complete, from_retry). Sorting by offset is
+        # log order, which for attempts is also attempt order within a pass.
+        tagged = [(off, ln, True, retry) for off, ln, retry in cell.events]
+        tagged += [(off, ln, False, False) for off, ln in cell.attempt_events]
+        if not tagged:
+            return completions, attempts, raw_events
+        tagged.sort(key=lambda item: item[0])
         with open(self.path, "rb") as f:
-            for offset, length, from_retry in events:
+            for offset, length, is_complete, from_retry in tagged:
                 f.seek(offset)
                 raw = f.read(length)
                 try:
                     parsed = json.loads(raw)
                 except json.JSONDecodeError:
                     continue  # file was replaced under us; offsets are stale
-                if isinstance(parsed, dict):
-                    out.append((parsed, from_retry))
-        return out
+                if not isinstance(parsed, dict):
+                    continue
+                raw_events.append(parsed)
+                if is_complete:
+                    completions.append((parsed, from_retry))
+                else:
+                    attempts.append(parsed)
+        return completions, attempts, raw_events
+
+    def _attempts_from_records(
+        self, attempt_recs: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """One entry per ``row_attempt`` record, in log (attempt) order.
+
+        Carries the real ``kind`` (``api``/``parse``), status, latency, backoff
+        and error the log recorded — so the count is the true number of tries
+        (P21), not a hard-coded 1 — plus the ``prompt_ref`` that tells a client
+        which tries have a captured body.
+        """
+        attempts = []
+        for n, rec in enumerate(attempt_recs, start=1):
+            t = rec.get("t")
+            latency = rec.get("latency_ms")
+            backoff = rec.get("backoff_s")
+            status = rec.get("status")
+            error = rec.get("error")
+            attempt_no = rec.get("attempt")
+            attempts.append(
+                {
+                    "n": n,
+                    "attempt": attempt_no if isinstance(attempt_no, int) else n,
+                    "kind": rec.get("kind"),
+                    "at": self._iso(float(t)) if isinstance(t, (int, float)) else None,
+                    "latency_ms": latency
+                    if isinstance(latency, (int, float))
+                    else None,
+                    "status": status if isinstance(status, str) else None,
+                    "backoff_s": backoff if isinstance(backoff, (int, float)) else None,
+                    "error": error if isinstance(error, dict) else None,
+                    "prompt_ref": _prompt_ref(rec.get("prompt_ref")),
+                }
+            )
+        return attempts
+
+    def _resolve_prompt(
+        self, attempt_recs: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Captured body for the cell's last body-bearing attempt, or None.
+
+        The last attempt carrying a ``prompt_ref`` is the try that actually
+        settled the cell (an api error carries none), so its body is the
+        prompt/response worth showing. Resolved by seeking the sidecar to the
+        recorded byte offset — never by reading the file whole.
+        """
+        ref = None
+        for rec in attempt_recs:
+            candidate = _prompt_ref(rec.get("prompt_ref"))
+            if candidate is not None:
+                ref = candidate
+        if ref is None:
+            return None
+        return self._read_prompt_body(ref["off"], ref["len"])
+
+    def _read_prompt_body(self, off: int, length: int) -> dict[str, Any] | None:
+        """Seek the sidecar to *off*, read exactly *length* bytes, parse one body.
+
+        Seek-only by contract: a 500MB capture is never read whole, so a single
+        prompt costs one seek and one bounded read. Returns the
+        ``{messages, response, parsed}`` body (already secret-redacted by accrue
+        at capture time) or None when the sidecar is absent, the span is corrupt,
+        or the bytes do not parse.
+        """
+        if off < 0 or length <= 0 or length > MAX_PROMPT_BODY_BYTES:
+            return None
+        try:
+            with open(self._sidecar_path, "rb") as f:
+                f.seek(off)
+                raw = f.read(length)
+        except OSError:
+            return None
+        try:
+            body = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return body if isinstance(body, dict) else None
 
 
 # ------------------------------------------------------------------- helpers
@@ -960,6 +1135,23 @@ class RunIndex:
 def _error_type(error: dict[str, Any] | None) -> str:
     """Group key for a failure; the v1 log's error object may be null."""
     return str((error or {}).get("type") or "Error")
+
+
+def _prompt_ref(raw: Any) -> dict[str, int] | None:
+    """Validate a ``row_attempt`` ``prompt_ref`` into ``{off, len}`` or None.
+
+    Null for api-error attempts and for every attempt of a metadata-tier run;
+    a well-formed one is two non-negative byte integers into the sidecar.
+    """
+    if (
+        isinstance(raw, dict)
+        and isinstance(raw.get("off"), int)
+        and isinstance(raw.get("len"), int)
+        and raw["off"] >= 0
+        and raw["len"] >= 0
+    ):
+        return {"off": raw["off"], "len": raw["len"]}
+    return None
 
 
 def _parse_iso(raw: Any) -> datetime | None:

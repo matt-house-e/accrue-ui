@@ -655,14 +655,24 @@ button:disabled { cursor: not-allowed; }
 }
 .attempt {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 10px;
   border: 1px solid var(--border-1);
   border-radius: 6px;
   margin-bottom: 6px;
   font: 400 12px/1 var(--font-mono);
   color: var(--muted);
+}
+.attempt-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.attempt-err {
+  color: var(--error-text);
+  font: 400 11px/1.4 var(--font-mono);
+  overflow-wrap: anywhere;
 }
 .attempt .kind-chip {
   font: 500 11px/1 var(--font-mono);
@@ -721,6 +731,43 @@ button:disabled { cursor: not-allowed; }
   overflow-x: auto;
   white-space: pre;
   margin: 0;
+}
+.prompt-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.prompt-msg {
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.prompt-role {
+  font: 600 10px/1 var(--font-sans);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint-2);
+  padding: 8px 10px;
+  background: var(--component);
+  border-bottom: 1px solid var(--border-1);
+}
+.prompt-msg.response .prompt-role,
+.prompt-msg.parsed .prompt-role {
+  color: var(--jade-11);
+}
+.prompt-content {
+  margin: 0;
+  padding: 10px;
+  font: 400 11px/1.6 var(--font-mono);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.empty-state code {
+  font-family: var(--font-mono);
+  color: var(--muted);
 }
 .insp-foot {
   flex: none;

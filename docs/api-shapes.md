@@ -1,7 +1,10 @@
-# API shapes (v0.1 contract)
+# API shapes (v0.2 contract)
 
 The frontend consumes these routes; the server (issue #1/#3) implements them.
-This document is the contract — both lanes code to it. All routes are
+This document is the contract — both lanes code to it. v0.2 is additive over
+v0.1: the run log's new `row_attempt` records give `/api/cell` a real
+per-attempt timeline and captured prompt/response bodies (issue #14); every
+v0.1 field is unchanged, and a v0.1 log still reads correctly. All routes are
 same-origin (`/api/*`), JSON unless noted. Timestamps are ISO 8601 UTC
 strings (`2026-08-17T09:41:02Z`). Money is USD as a JSON number. Reference
 fixtures live in `tests/fixtures/api/` and conform to these shapes exactly.
@@ -20,13 +23,19 @@ Cell state fits one byte (also documented in CLAUDE.md):
 | 5 | error |
 | 6 | skipped |
 
-State 4 (retrying) is set for exactly the cells a `retry_start` record lists,
-and holds until each one's own `row_complete` arrives. While a cell is in it,
-it is **not** counted anywhere as settled: it leaves `steps[].done`,
-`stats.errors`, its error group and `rows.done`, and rejoins them with
-whatever its retry produces. States 0 and 1 come from the emitter; the v1 log
-has no per-row start event, so a step in progress leaves its unfinished cells
-pending (0).
+State 4 (retrying) has two real sources, never an inference from preview text:
+a `retry_start` record (a `retry_failed()` segment names the cells it will
+re-run), and — new in v0.2 — a **failed `row_attempt`** during the initial
+pass. A `row_attempt` whose `status` is not `ok` means a try failed and
+another (or a terminal `row_complete`) is coming, so a not-yet-settled cell
+shows as retrying in the interim. Either way it holds until the cell's own
+`row_complete` arrives. While a cell is retrying it is **not** counted
+anywhere as settled: it leaves `steps[].done`, `stats.errors`, its error group
+and `rows.done`, and rejoins them with whatever its next `row_complete`
+produces. (A `retry_start` cell was already terminal, so its prior tally is
+unwound then; an initial-pass cell was only ever pending, so there is nothing
+to unwind.) States 0 and 1 come from the emitter; the v1 log has no per-row
+start event, so a step in progress leaves its unfinished cells pending (0).
 
 ## `GET /api/run`
 
@@ -200,29 +209,60 @@ One cell's full detail for the inspector.
   "usage": { "in": 1204, "out": 0, "cost": 0.0031 },  // null when nothing was billed
   "elapsed_ms": 26100,             // queued -> terminal; null when not finished
   "queued_at": "2026-08-17T09:41:00Z",  // null when never queued
-  "attempts": [                    // null when no attempt has started —
-                                   // pending, skipped, or served from cache.
-                                   // One entry per row_complete the log
-                                   // holds for this cell, in log order, so a
-                                   // healed cell shows its failure AND its
-                                   // retry (capped at the newest 50).
+  "attempts": [                    // null when no attempt ran — pending,
+                                   // skipped, or served from cache. Capped at
+                                   // the newest 50. TWO shapes, by log tier:
+    // v0.2 (log has row_attempt records): one entry per real try, in attempt
+    // order. `kind`/`status`/`backoff_s`/`error`/`prompt_ref` are additive
+    // over the v0.1 shape below.
     {
-      "n": 1,                      // 1-based attempt number
-      "kind": "live",              // "live" | "retry" | "batch": "retry" for
-                                   // records inside a retry_start..retry_end
-                                   // segment, else the step's mode
+      "n": 1,                      // 1-based display index (dense, 1..N)
+      "attempt": 1,                // the log's own attempt number
+      "kind": "api",               // "api" | "parse": the retry loop this try
+                                   // ran in (an api call vs. parsing/validating
+                                   // its result)
       "at": "2026-08-17T09:41:02Z", // string | null (needs a run start time)
-      "latency_ms": 1900,
-      "status": "error",           // "ok" | "error"
-      "backoff_s": 2               // sleep before next attempt; null on the final one
+      "latency_ms": 1900,          // number | null
+      "status": "rate_limited",    // "ok" | "rate_limited" | "timeout" |
+                                   // "api_error" | "parse_error" |
+                                   // "validation_error"
+      "backoff_s": 2.0,            // sleep before the next try; null when none
+      "error": { "type": "LLMAPIError", "msg": "..." },  // null on success
+      "prompt_ref": { "off": 1276, "len": 1283 }  // byte span in the sidecar,
+                                   // or null (api-error tries and every try of
+                                   // a metadata-tier run carry no body)
     }
+    // v0.1 (no row_attempt records): synthesized one-per-row_complete, keys
+    // { "n", "kind": "live"|"retry"|"batch", "at", "latency_ms",
+    //   "status": "ok"|"error", "backoff_s": null }.
   ],
+  "prompt": {                      // captured request/response for the cell's
+                                   // last body-bearing attempt; null when the
+                                   // run captured no bodies or this cell had
+                                   // none. Already secret-redacted by accrue.
+    "messages": [{ "role": "system", "content": "..." }],
+    "response": "{\"grade\": \"B\"}",  // string | object (the raw model output)
+    "parsed": { "grade": "B" }     // object | null (the parsed result)
+  },
+  "capture_available": true,       // did THIS run capture prompt bodies (does
+                                   // the <run>.prompts.jsonl sidecar exist)?
+                                   // false => the inspector shows a "re-run
+                                   // with capture=\"prompts\"" hint instead of
+                                   // an empty prompt pane
   "values": { "funding": "..." },  // full output values; null unless ok/cached.
                                    // "__"-prefixed keys are internal fields.
-  "raw_events": [ { "t": "...", "ev": "..." } ]  // original run-log JSONL records
-                                   // for this cell, verbatim, in log order
+  "raw_events": [ { "t": "...", "type": "..." } ]  // original run-log JSONL
+                                   // records for this cell (row_attempt and
+                                   // row_complete), verbatim, in log order
 }
 ```
+
+`prompt` is resolved by **seeking the sidecar** (`<run_id>.prompts.jsonl`,
+beside the main log) to the recorded byte offset and reading exactly `len`
+bytes — the whole capture is never loaded, so a 500MB sidecar costs one seek
+per inspected cell. `prompt_ref` on each attempt is that byte span; the server
+resolves only the last one that has a body (the try that settled the cell) into
+`prompt`.
 
 ## `GET /api/events` (SSE)
 
