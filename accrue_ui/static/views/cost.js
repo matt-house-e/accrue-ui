@@ -5,11 +5,16 @@ import { IconInfo } from "../lib/icons.js";
 import { fmtInt, fmtMoney } from "../lib/fmt.js";
 import { snapshot } from "../lib/store.js";
 
+// Single-hue CSS bars (--jade-9 fill, 14px, rounded right end only), widths
+// proportional to the largest value, mono figure right-aligned. The text row
+// is the data; the bar only ranks it. No chart library — see CLAUDE.md.
 function BarChart({ title, entries }) {
   const sorted = [...entries].sort((a, b) => b[1] - a[1]);
   const max = Math.max(...sorted.map(([, v]) => v), 0.0001);
   return html`<div class="cost-card">
     <h3>${title}</h3>
+    ${sorted.length === 0 &&
+    html`<div class="empty-state">Nothing priced in this run.</div>`}
     ${sorted.map(
       ([label, value]) => html`<div class="bar-row" key=${label}>
         <span class="bar-label">${label}</span>
@@ -19,14 +24,18 @@ function BarChart({ title, entries }) {
             style=${{ width: `${Math.max((value / max) * 100, 1)}%` }}
           ></span>
         </span>
-        <span class="bar-value">${fmtMoney(value)}</span>
+        <span class="bar-value">${fmtMoney(value) ?? DASH}</span>
       </div>`
     )}
   </div>`;
 }
 
+// A figure the run cannot supply reads as an em-dash. Dropping the tile
+// entirely (what this used to do) made the strip silently change shape and
+// left the reader unable to tell "nothing spent" from "not measured".
+const DASH = "—";
+
 function Tile({ label, value, tone = "", tip = null, info = false }) {
-  if (value == null) return null;
   let head;
   if (tip && info) {
     // Plain label + info icon carrying the tooltip.
@@ -41,7 +50,7 @@ function Tile({ label, value, tone = "", tip = null, info = false }) {
   }
   return html`<div class="cost-tile">
     <div class="k">${head}</div>
-    <div class=${`v ${tone}`}>${value}</div>
+    <div class=${`v ${value == null ? "dim" : tone}`}>${value ?? DASH}</div>
   </div>`;
 }
 
@@ -113,6 +122,7 @@ export function Cost() {
           label="Vs plan"
           value=${vsPlan != null ? fmtMoney(vsPlan) : null}
           tone=${vsPlan != null && vsPlan < 0 ? "green" : "red"}
+          tip="Actual minus the plan estimate; needs both to exist."
         />
         <${Tile} label="Saved by cache" value=${fmtMoney(cacheSaved)} tone="green" />
         <${Tile}

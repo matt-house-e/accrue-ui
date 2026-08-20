@@ -73,7 +73,10 @@ class Cell:
     t: float | None = None  # log-time of the terminal record
     values: dict[str, Any] | None = None
     preview: str | None = None
-    events: list[tuple[int, int]] = field(default_factory=list)  # (offset, len)
+    #: One entry per row_complete seen for this cell: (offset, length,
+    #: from_a_retry_segment). The bytes are re-read on demand; the flag is
+    #: what makes the inspector's attempt list say "retry".
+    events: list[tuple[int, int, bool]] = field(default_factory=list)
 
 
 @dataclass
@@ -163,6 +166,7 @@ class RunIndex:
         self._steps: list[StepState] = []
         self._step_idx: dict[str, int] = {}
         self._declared_rows: int | None = None  # pipeline_start's num_rows
+        self._in_retry = False  # inside a retry_start..retry_end segment
         self._nrows = 0
         self._cells = bytearray()
         # Terminal cells per row + the count of fully-done rows, maintained
@@ -277,6 +281,10 @@ class RunIndex:
             self._apply_step_end(data)
         elif rtype == "pipeline_end":
             self._apply_pipeline_end(data)
+        elif rtype == "retry_start":
+            self._apply_retry_start(data)
+        elif rtype == "retry_end":
+            self._in_retry = False
         # Unknown record types are ignored (v1 contract: additive changes).
 
     def _apply_pipeline_start(self, data: dict[str, Any]) -> None:
@@ -317,6 +325,53 @@ class RunIndex:
             step.total = max(step.total, num_rows)
             self._ensure_dims(nrows=num_rows)
 
+    def _apply_retry_start(self, data: dict[str, Any]) -> None:
+        """Mark the cells this retry segment is about to re-execute.
+
+        ``retry_start`` lists them exactly (``cells: [{step, row}, ...]``),
+        which is the one moment state 4 (retrying) is knowable: the v1 log
+        has no per-row start events, so between here and each cell's
+        ``row_complete`` these are the cells in flight. Their old terminal
+        state is unwound first — the counters, the error group and
+        ``rows.done`` all describe cells that are no longer settled.
+        """
+        self._in_retry = True
+        cells = data.get("cells")
+        if not isinstance(cells, list):
+            return
+        for entry in cells:
+            if not isinstance(entry, dict):
+                continue
+            name, row = entry.get("step"), entry.get("row")
+            if not isinstance(name, str) or not isinstance(row, int) or row < 0:
+                continue
+            if row >= self._row_limit:
+                continue
+            step = self._step(name)
+            self._ensure_dims(row=row)
+            idx = self._step_idx[name]
+            pos = row * len(self._steps) + idx
+            prev = self._cells[pos]
+            if prev == RETRYING:
+                continue
+            if prev in TERMINAL:
+                self._clear_terminal(step, row, prev)
+            self._cells[pos] = RETRYING
+            self._dirty_cells[(row, idx)] = RETRYING
+            self._dirty_steps.add(name)
+
+    def _clear_terminal(self, step: StepState, row: int, prev: int) -> None:
+        """Undo everything a settled cell contributed; it is being re-run."""
+        step.done -= 1
+        if prev == ERROR:
+            step.errors -= 1
+            self._forget_error(step.name, row, step.cells.get(row))
+        elif prev == CACHED:
+            step.cached_count -= 1
+        if self._row_terminal[row] == len(self._steps):
+            self._rows_done -= 1
+        self._row_terminal[row] -= 1
+
     def _apply_row_complete(self, record: TailRecord) -> None:
         data = record.data
         name = data.get("step")
@@ -352,17 +407,12 @@ class RunIndex:
         self._dirty_steps.add(name)
         if prev in TERMINAL:
             # Re-delivery (a retry segment, or a duplicate): unwind the old
-            # terminal state before applying the new one.
-            step.done -= 1
-            if prev == ERROR:
-                step.errors -= 1
-                self._forget_error(name, row, cell)
-            elif prev == CACHED:
-                step.cached_count -= 1
-        else:
-            self._row_terminal[row] += 1
-            if self._row_terminal[row] == nsteps:
-                self._rows_done += 1
+            # terminal state before applying the new one. A cell marked
+            # RETRYING by retry_start was already unwound there.
+            self._clear_terminal(step, row, prev)
+        self._row_terminal[row] += 1
+        if self._row_terminal[row] == nsteps:
+            self._rows_done += 1
         step.done += 1
         if state == ERROR:
             step.errors += 1
@@ -392,7 +442,7 @@ class RunIndex:
         cell.t = t
         cell.values = values
         cell.preview = self._render_preview(state, values, error)
-        cell.events.append((record.offset, record.length))
+        cell.events.append((record.offset, record.length, self._in_retry))
         if len(cell.events) > MAX_CELL_EVENTS:
             # A pathological log (or a cell retried hundreds of times) must
             # not grow this list forever; the inspector wants the recent
@@ -820,18 +870,10 @@ class RunIndex:
                 "cost": round(cost, 6) if cost is not None else None,
             }
 
+        records = self._read_events(cell.events) if cell else []
         attempts = None
-        if cell is not None and state in (OK, ERROR) and not cell.from_cache:
-            attempts = [
-                {
-                    "n": 1,
-                    "kind": "batch" if step.is_batch else "live",
-                    "at": self._iso(cell.t),
-                    "latency_ms": cell.elapsed_ms,
-                    "status": "error" if state == ERROR else "ok",
-                    "backoff_s": None,
-                }
-            ]
+        if cell is not None and records and not cell.from_cache:
+            attempts = self._attempts(step, state, records)
 
         return {
             "step": step_name,
@@ -846,16 +888,59 @@ class RunIndex:
             "queued_at": None,
             "attempts": attempts,
             "values": cell.values if cell and state in (OK, CACHED) else None,
-            "raw_events": self._read_raw(cell.events) if cell else [],
+            "raw_events": [record for record, _retry in records],
         }
 
-    def _read_raw(self, events: list[tuple[int, int]]) -> list[dict[str, Any]]:
-        """Re-read raw records from the log by offset; nothing cached in RAM."""
-        out: list[dict[str, Any]] = []
+    def _attempts(
+        self, step: StepState, state: int, records: list[tuple[dict[str, Any], bool]]
+    ) -> list[dict[str, Any]] | None:
+        """One attempt per row_complete this cell actually produced.
+
+        A retried cell has two or more records in the log, so "Failed after
+        1 attempts" was never true of a cell you had already retried — the
+        count came from a hard-coded single-entry list. Records that landed
+        inside a ``retry_start`` … ``retry_end`` segment are kind ``retry``;
+        the rest are ``batch`` or ``live`` after the step's mode.
+        """
+        if state in (PENDING, SKIPPED):
+            return None  # nothing ever ran for this cell
+        attempts = []
+        for n, (record, from_retry) in enumerate(records, start=1):
+            if from_retry:
+                kind = "retry"
+            else:
+                kind = "batch" if step.is_batch else "live"
+            latency = record.get("elapsed_ms")
+            t = record.get("t")
+            attempts.append(
+                {
+                    "n": n,
+                    "kind": kind,
+                    "at": self._iso(float(t)) if isinstance(t, (int, float)) else None,
+                    "latency_ms": latency
+                    if isinstance(latency, (int, float))
+                    else None,
+                    "status": "error" if record.get("status") == "error" else "ok",
+                    # The v1 log records no inter-attempt sleep.
+                    "backoff_s": None,
+                }
+            )
+        return attempts
+
+    def _read_events(
+        self, events: list[tuple[int, int, bool]]
+    ) -> list[tuple[dict[str, Any], bool]]:
+        """Re-read raw records from the log by offset; nothing cached in RAM.
+
+        Each pairs with the flag saying whether it came from a retry
+        segment, so one file read serves both ``raw_events`` and the
+        attempt list.
+        """
+        out: list[tuple[dict[str, Any], bool]] = []
         if not events:
             return out
         with open(self.path, "rb") as f:
-            for offset, length in events:
+            for offset, length, from_retry in events:
                 f.seek(offset)
                 raw = f.read(length)
                 try:
@@ -863,7 +948,7 @@ class RunIndex:
                 except json.JSONDecodeError:
                     continue  # file was replaced under us; offsets are stale
                 if isinstance(parsed, dict):
-                    out.append(parsed)
+                    out.append((parsed, from_retry))
         return out
 
 

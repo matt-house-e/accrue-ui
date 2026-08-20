@@ -171,6 +171,10 @@ def test_run_fixture_shape():
 def test_run_fixture_invariants():
     doc = _run_doc()
     spend = doc["stats"]["spend"]
+    # The sum invariant is scoped to a priced run: an unpriceable one reports
+    # null spend and empty maps (docs/api-shapes.md, and test_contract.py's
+    # test_stats_and_cost_with_no_pricing).
+    assert spend is not None
     assert round(sum(doc["cost"]["by_step"].values()), 2) == spend
     assert round(sum(doc["cost"]["by_model"].values()), 2) == spend
     assert sum(g["count"] for g in doc["error_groups"]) == doc["stats"]["errors"]
@@ -384,6 +388,50 @@ def test_stat_tiles_are_honest_when_the_run_is_not_live():
     # Throughput renders as an integer, and as an em-dash when unknown.
     assert "fmtInt(Math.round(throughput))" in app_js
     assert "throughput == null" in app_js
+
+
+def test_nullable_money_renders_as_an_em_dash():
+    """spend/cache_saved/wasted/batch_saved are number|null — never blank."""
+    cost = (STATIC / "views" / "cost.js").read_text()
+    assert 'const DASH = "—"' in cost
+    assert "value ?? DASH" in cost
+    assert "if (value == null) return null;" not in cost  # tiles are kept
+    app_js = (STATIC / "app.js").read_text()
+    assert "fmtMoney(stats.spend) ?? DASH" in app_js
+    css = (STATIC / "style.css").read_text()
+    assert ".cost-tile .v.dim" in css
+
+
+def test_run_chip_does_not_repeat_the_id():
+    app_js = (STATIC / "app.js").read_text()
+    assert "run.name !== run.id" in app_js
+    assert "${runLabel(run)}" in app_js
+    assert "${r.name} / ${r.id}" not in app_js
+
+
+def test_attempt_count_is_pluralized():
+    inspector = (STATIC / "views" / "inspector.js").read_text()
+    assert 'after ${plural(n, "attempt")}' in inspector
+    assert "attempts —" not in inspector
+
+
+def test_cost_bars_match_the_approved_design():
+    """Single-hue CSS bars: jade fill, 14px, rounded right end, mono value."""
+    cost = (STATIC / "views" / "cost.js").read_text()
+    # Label, bar, value — in that order, in the same row.
+    row = cost.split('class="bar-row"', 1)[1].split("</div>", 1)[0]
+    assert row.index("bar-label") < row.index("bar-fill") < row.index("bar-value")
+    assert "(value / max) * 100" in row  # widths proportional to the max
+
+    css = (STATIC / "style.css").read_text()
+    fill = css.split(".bar-fill {", 1)[1].split("}", 1)[0]
+    assert "height: 14px" in fill
+    assert "background: var(--jade-9)" in fill  # #29a383, via the token table
+    assert "border-radius: 0 4px 4px 0" in fill  # right end only
+    assert "#" not in fill  # no literal colors outside :root
+    value = css.split(".bar-row .bar-value {", 1)[1].split("}", 1)[0]
+    assert "var(--font-mono)" in value
+    assert "text-align: right" in value
 
 
 def test_retry_note_uses_existing_error_tokens():

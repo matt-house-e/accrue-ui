@@ -38,6 +38,13 @@ function Logo() {
   </svg>`;
 }
 
+// `name` is log-derived (the log file's stem) and `id` is the run id, which
+// are usually the same string — "2026-08-17a / 2026-08-17a" reads as a bug.
+// Show the pair only when it actually says two things.
+function runLabel(run) {
+  return run.name && run.name !== run.id ? `${run.name} / ${run.id}` : run.id;
+}
+
 function RunChip({ run }) {
   const [open, setOpen] = useState(false);
   const [runs, setRuns] = useState([]);
@@ -46,13 +53,13 @@ function RunChip({ run }) {
     setOpen(!open);
   };
   return html`<button class="run-chip" onClick=${toggle}>
-    ${run.name} / ${run.id}
+    ${runLabel(run)}
     <${IconChevronDown} />
     ${open &&
     html`<div class="run-menu">
       ${runs.map(
         (r) => html`<span class="run-menu-item" key=${r.id}>
-          ${r.name} / ${r.id}
+          ${runLabel(r)}
           ${r.live && html`<span class="live-dot"></span>`}
         </span>`
       )}

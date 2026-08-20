@@ -25,12 +25,14 @@ const STATUS_BYTE = {
   skipped: 6,
 };
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 function bannerText(d) {
   switch (d.status) {
     case "error": {
       const n = d.attempts ? d.attempts.length : 0;
       const type = d.error ? d.error.type : "error";
-      return n ? `Failed after ${n} attempts — ${type}` : `Failed — ${type}`;
+      return n ? `Failed after ${plural(n, "attempt")} — ${type}` : `Failed — ${type}`;
     }
     case "cached":
       return "Served from cache";

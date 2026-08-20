@@ -20,6 +20,14 @@ Cell state fits one byte (also documented in CLAUDE.md):
 | 5 | error |
 | 6 | skipped |
 
+State 4 (retrying) is set for exactly the cells a `retry_start` record lists,
+and holds until each one's own `row_complete` arrives. While a cell is in it,
+it is **not** counted anywhere as settled: it leaves `steps[].done`,
+`stats.errors`, its error group and `rows.done`, and rejoins them with
+whatever its retry produces. States 0 and 1 come from the emitter; the v1 log
+has no per-row start event, so a step in progress leaves its unfinished cells
+pending (0).
+
 ## `GET /api/run`
 
 Full snapshot of the run, including the complete cell-state array.
@@ -192,11 +200,18 @@ One cell's full detail for the inspector.
   "usage": { "in": 1204, "out": 0, "cost": 0.0031 },  // null when nothing was billed
   "elapsed_ms": 26100,             // queued -> terminal; null when not finished
   "queued_at": "2026-08-17T09:41:00Z",  // null when never queued
-  "attempts": [                    // null when no attempt has started
+  "attempts": [                    // null when no attempt has started —
+                                   // pending, skipped, or served from cache.
+                                   // One entry per row_complete the log
+                                   // holds for this cell, in log order, so a
+                                   // healed cell shows its failure AND its
+                                   // retry (capped at the newest 50).
     {
       "n": 1,                      // 1-based attempt number
-      "kind": "live",              // "live" | "retry" | "batch"
-      "at": "2026-08-17T09:41:02Z",
+      "kind": "live",              // "live" | "retry" | "batch": "retry" for
+                                   // records inside a retry_start..retry_end
+                                   // segment, else the step's mode
+      "at": "2026-08-17T09:41:02Z", // string | null (needs a run start time)
       "latency_ms": 1900,
       "status": "error",           // "ok" | "error"
       "backoff_s": 2               // sleep before next attempt; null on the final one
@@ -303,12 +318,16 @@ Known run logs, newest first.
 {
   "runs": [
     {
-      "id": "2026-08-17a",
-      "name": "acme-enrichment",
+      "id": "2026-08-17a",         // run id from pipeline_start, else the stem
+      "name": "acme-enrichment",   // log-derived: the file's stem
       "path": ".accrue/runs/2026-08-17a.jsonl",
-      "started_at": "2026-08-17T09:35:12Z",
-      "live": true
+      "started_at": "2026-08-17T09:35:12Z",  // string | null
+      "live": true                 // mtime recency, same rule as run.live
     }
   ]
 }
 ```
+
+`name` and `id` are frequently the same string (a log named after its run).
+Clients should show `name / id` only when they differ, and the id alone
+otherwise.
