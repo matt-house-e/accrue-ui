@@ -636,6 +636,24 @@ def test_post_retry_rejects_bad_selectors(tmp_path: Path, write_module, body: An
     assert resp.status_code == 400
 
 
+def test_post_retry_rejects_rows_outside_the_run(tmp_path: Path, write_module):
+    """Out-of-range rows are a 400, not a 202 that dies inside the pipeline."""
+    log = _failing_log(tmp_path, num_rows=6)
+    mod, client = _retry_client(log, write_module)
+    with client:
+        for rows in ([6], [-1], [1, 99]):
+            resp = client.post("/api/retry", json={"rows": rows}, headers=ORIGIN)
+            assert resp.status_code == 400, rows
+            assert "out of range 0..5" in resp.json()["detail"]
+        # The valid neighbours of those requests still work.
+        assert (
+            client.post("/api/retry", json={"rows": [5]}, headers=ORIGIN).status_code
+            == 202
+        )
+        _wait_until(lambda: not client.get("/api/run").json()["retry"]["running"])
+    assert len(sys.modules[mod].CALLS) == 1  # the rejects never reached it
+
+
 def test_post_retry_rejects_a_non_json_body(tmp_path: Path, write_module):
     log = _failing_log(tmp_path)
     _mod, client = _retry_client(log, write_module)

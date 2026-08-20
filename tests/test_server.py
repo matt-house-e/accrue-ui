@@ -396,6 +396,121 @@ def test_row_complete_key_wins_over_heuristic(tmp_path: Path):
     assert detail["key"] == "explicit.com"
 
 
+def test_interrupted_old_run_is_not_live(tmp_path: Path):
+    """No pipeline_end, no writes for hours: dead, not LIVE forever."""
+    log = tmp_path / "interrupted.jsonl"
+    records = _feature_records()
+    cut = next(i for i, r in enumerate(records) if r["type"] == "pipeline_end")
+    write_log(log, records[:cut])  # everything but the pipeline_end
+    age_file(log, seconds=3 * 24 * 3600)
+    with client_for(log) as client:
+        run = client.get("/api/run").json()["run"]
+        runs = client.get("/api/runs").json()["runs"]
+    assert run["live"] is False
+    # elapsed is the log's own span (last t), not now-minus-started_at.
+    assert run["elapsed_s"] == pytest.approx(55.0)
+    assert runs[0]["live"] is False
+
+
+def test_bogus_row_index_is_ignored(tmp_path: Path):
+    """One corrupt `row` must not resize the grid to millions of cells."""
+    log = tmp_path / "bogus.jsonl"
+    records = _feature_records()[:2]
+    records.append(row("fetch", 50_000_000, 1.0, values={"domain": "x"}))
+    records.append(row("fetch", 0, 1.1, values={"domain": "ok"}))
+    write_log(log, records)
+    age_file(log)
+    with client_for(log) as client:
+        body = client.get("/api/run").json()
+    assert body["cells"]["rows"] == NROWS  # the declared count, unchanged
+    assert body["steps"][0]["done"] == 1  # only the real row landed
+
+
+def test_row_index_cap_applies_without_a_declared_row_count(tmp_path: Path):
+    """A log with no pipeline_start still cannot be talked into a huge grid."""
+    log = tmp_path / "headless.jsonl"
+    write_log(log, [row("fetch", 5_000_000, 1.0), row("fetch", 3, 1.1)])
+    age_file(log)
+    with client_for(log) as client:
+        body = client.get("/api/run").json()
+    assert body["cells"]["rows"] == 4  # row 3 only
+    assert body["steps"][0]["done"] == 1
+
+
+def test_z_form_timestamps_are_parsed(tmp_path: Path):
+    """started_at may end in Z; 3.10's fromisoformat cannot read that alone."""
+    log = tmp_path / "zform.jsonl"
+    records = _feature_records()[:3]
+    records[0] = {**records[0], "started_at": "2026-08-19T10:00:00Z"}
+    write_log(log, records)
+    age_file(log)
+    with client_for(log) as client:
+        body = client.get("/api/run").json()
+    assert body["run"]["started_at"] == "2026-08-19T10:00:00Z"
+    assert body["error_groups"] == []
+
+
+def test_completion_timestamps_stay_bounded(tmp_path: Path):
+    """The throughput window is a window, not an ever-growing list."""
+    from accrue_ui.server.index import THROUGHPUT_WINDOW_S, RunIndex
+    from accrue_ui.server.tail import TailRecord
+
+    index = RunIndex(tmp_path / "unused.jsonl")
+    index.apply(TailRecord(0, 1, _feature_records()[0]))
+    for i in range(5000):
+        index.apply(TailRecord(0, 1, row("fetch", i % NROWS, i * 0.1)))
+    span = index._completion_ts[-1] - index._completion_ts[0]
+    assert span <= THROUGHPUT_WINDOW_S
+    assert len(index._completion_ts) <= THROUGHPUT_WINDOW_S / 0.1 + 1
+
+
+def test_cell_events_are_capped(tmp_path: Path):
+    """A cell retried hundreds of times keeps the recent records, not all."""
+    from accrue_ui.server.index import MAX_CELL_EVENTS, RunIndex
+    from accrue_ui.server.tail import TailRecord
+
+    index = RunIndex(tmp_path / "unused.jsonl")
+    index.apply(TailRecord(0, 1, _feature_records()[0]))
+    for i in range(MAX_CELL_EVENTS * 3):
+        index.apply(TailRecord(i, 1, row("fetch", 0, 1.0 + i)))
+    cell = index.steps[0].cells[0]
+    assert len(cell.events) == MAX_CELL_EVENTS
+    assert cell.events[-1][0] == MAX_CELL_EVENTS * 3 - 1  # newest kept
+
+
+def test_index_rebuilds_when_the_log_is_replaced_in_place(tmp_path: Path):
+    """A second run written over the same path must not splice onto the first."""
+    log = tmp_path / "reused.jsonl"
+    first = _feature_records()[:2]
+    first.append(row("fetch", 0, 1.0, values={"domain": "first.com"}))
+    write_log(log, first)
+    with client_for(log) as client:
+        deadline = time.time() + 5
+        while client.get("/api/run").json()["steps"][0]["done"] == 0:
+            assert time.time() < deadline, "first run never indexed"
+            time.sleep(0.05)
+
+        second = _feature_records()[:2]
+        second[0] = {**second[0], "run_id": "second-run", "num_rows": NROWS}
+        second += [
+            row("fetch", r, 1.0 + r, values={"domain": f"s{r}.com"}) for r in (1, 2)
+        ]
+        write_log(log, second)  # same inode, longer than what was consumed
+
+        deadline = time.time() + 5
+        while True:
+            snap = client.get("/api/run").json()
+            if snap["run"]["id"] == "second-run":
+                break
+            assert time.time() < deadline, "index never rebuilt"
+            time.sleep(0.05)
+        values = client.get("/api/values?start=0&count=3").json()
+    assert snap["steps"][0]["done"] == 2  # the new run's rows only
+    keys = {r["row"]: r["key"] for r in values["rows"]}
+    assert keys[1] == "s1.com"
+    assert keys[0] == "row 0"  # the old run's row 0 is gone, not spliced in
+
+
 def test_app_follows_appended_records(tmp_path: Path):
     """The background follower keeps the shared index current."""
     log = tmp_path / "live.jsonl"

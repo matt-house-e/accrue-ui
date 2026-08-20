@@ -138,6 +138,18 @@ def _selected_rows(body: Any, index: RunIndex) -> list[int]:
             raise HTTPException(
                 status_code=400, detail='"rows" must be a non-empty list of integers'
             )
+        # Rows the run does not have are a client bug, not a retry: accepting
+        # them 202s and then fails inside the pipeline, where the only trace
+        # is retry.last_error minutes later.
+        out_of_range = sorted({r for r in rows if r < 0 or r >= index.nrows})
+        if out_of_range:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"rows out of range 0..{index.nrows - 1}: "
+                    f"{out_of_range[:5]}{'…' if len(out_of_range) > 5 else ''}"
+                ),
+            )
         return sorted(set(rows))
 
     group = body["group"]
@@ -179,7 +191,12 @@ async def post_retry(request: Request) -> JSONResponse:
         steps = [body["group"]["step"]]
 
     if not controller.start(rows, steps=steps, display_key=index.display_key):
-        return JSONResponse({**block, "reason": ALREADY_RUNNING}, status_code=409)
+        # Re-read the block: `block` above was taken before `await
+        # request.json()` yielded, so its `running` may predate the retry
+        # that is now refusing us. The reason and the state must agree.
+        return JSONResponse(
+            {**controller.block(), "reason": ALREADY_RUNNING}, status_code=409
+        )
     return JSONResponse({"accepted": len(rows)}, status_code=202)
 
 

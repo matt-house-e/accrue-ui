@@ -28,10 +28,16 @@ Full snapshot of the run, including the complete cell-state array.
 {
   "run": {
     "id": "2026-08-17a",           // run identifier (log-derived)
-    "name": "acme-enrichment",     // pipeline/run name
-    "started_at": "2026-08-17T09:35:12Z",
-    "live": true,                  // log is still being appended
-    "elapsed_s": 401,              // seconds since started_at at snapshot time
+    "name": "acme-enrichment",     // log-derived name (the file's stem)
+    "started_at": "2026-08-17T09:35:12Z",  // string | null: absent or
+                                   // unparseable pipeline_start.started_at
+    "live": true,                  // log was written to in the last few
+                                   // seconds — mtime recency ONLY
+    "elapsed_s": 401,              // live: seconds since started_at.
+                                   // finished: pipeline_end's elapsed_s.
+                                   // interrupted and cold: the log's own
+                                   // span (its last `t`), never a clock
+                                   // that keeps climbing for a dead run
     "schema_v": 1                  // run-log schema version
   },
   "steps": [                       // pipeline order; index = stepIndex in deltas
@@ -50,12 +56,17 @@ Full snapshot of the run, including the complete cell-state array.
   ],
   "rows": { "total": 5000, "done": 3412 },  // done = rows complete through the last step
   "stats": {
-    "spend": 4.83,                 // USD spent so far
+    "spend": 4.83,                 // number | null: USD spent so far, null
+                                   // when nothing in the run could be priced
     "cache_hit_rate": 0.72,        // 0..1
     "errors": 43,                  // total errored cells
-    "throughput_per_min": 248,     // completed cells/min (recent window)
-    "eta_s": 384,                  // estimated seconds remaining; null when unknown
-    "cache_saved": 1.94            // USD saved by cache hits
+    "throughput_per_min": 248,     // number | null: completed cells/min over
+                                   // the recent window. null until the log
+                                   // holds at least 5s, below which the
+                                   // divisor makes the rate meaningless
+    "eta_s": 384,                  // estimated seconds remaining; null when
+                                   // there is no throughput to derive it from
+    "cache_saved": 1.94            // number | null, same rule as spend
   },
   "cells": {
     "encoding": "b64",
@@ -71,8 +82,9 @@ Full snapshot of the run, including the complete cell-state array.
       "count": 38,
       "message": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, ...",
       "rows": [[1211, 1214], [1284, 1284]],  // inclusive row ranges, sorted
-      "first_t": "2026-08-17T09:38:32Z",
-      "last_t": "2026-08-17T09:41:29Z",
+      "first_t": "2026-08-17T09:38:32Z",     // string | null: null when the
+      "last_t": "2026-08-17T09:41:29Z",      // run has no parseable start
+                                             // time to offset log `t` from
       "histogram": [0, 1, 6, 9, ...],        // ~22 equal time buckets first_t..last_t,
                                              // ints, sums to count
       "hint": "All 38 landed in a 3-minute burst — ..."  // string | null
@@ -91,8 +103,9 @@ Full snapshot of the run, including the complete cell-state array.
       "cache_read": 2914220,
       "cache_write": 388051
     },
-    "wasted": 0.13,                // USD spent on cells that ultimately failed
-    "batch_saved": 1.28            // USD saved by batch-mode pricing
+    "wasted": 0.13,                // number | null: USD spent on cells that
+                                   // ultimately failed
+    "batch_saved": 1.28            // number | null: USD saved by batch pricing
   },
   "retry": {
     "available": false,            // POST /api/retry would work
@@ -108,18 +121,35 @@ Full snapshot of the run, including the complete cell-state array.
 retry enabled — including `--data` when the launch used it. When the server
 was launched without `--pipeline` it carries the `<module:attr>` placeholder.
 
+The four dollar figures — `stats.spend`, `stats.cache_saved`, `cost.wasted`,
+`cost.batch_saved` — are `number | null` **together**: a run whose steps have
+no model (function steps) or only unknown models cannot be priced at all, and
+the server reports null rather than a misleading `0`. `cost.by_step` /
+`cost.by_model` then hold only the steps that *could* be priced, and are
+`{}` when none could. Clients must render null as an em-dash, not as blank
+and not as `$0.00`.
+
 Invariants the server must keep:
 
-- `stats.spend == sum(cost.by_step.values()) == sum(cost.by_model.values())`
-  (rounding to cents allowed).
+- **When `stats.spend` is non-null:** `stats.spend ==
+  sum(cost.by_step.values()) == sum(cost.by_model.values())` (rounding to
+  cents allowed). When it is null, both maps are empty and the invariant
+  does not apply.
 - `stats.errors == sum(g.count for g in error_groups) == sum(s.errors for s in steps)`.
 - `cells.rows * cells.steps == len(decoded bytes)`; every byte is `0..6`.
 - `steps` order matches `stepIndex` used by `cells` and SSE deltas.
+- Row indices in the log outside `0..rows.total-1` are ignored, never
+  grown into: a corrupt `row` cannot resize the grid. Without a declared
+  `num_rows`, indices at or above 1,000,000 are treated as corrupt.
 
 ## `GET /api/values?start=A&count=N`
 
 Windowed row values for the data render mode and row labels. `start` is a
-row index, `count` a row count; the server clamps to the log's bounds.
+row index, `count` a row count; the server clamps to the log's bounds **and
+to 1000 rows per request**. A client whose visible window spans more than
+1000 row indices (a sparse filter over a large run) must therefore page —
+asking for the whole span returns a short answer, and re-asking for the same
+over-wide window is a refetch loop, not a retry.
 
 ```jsonc
 {

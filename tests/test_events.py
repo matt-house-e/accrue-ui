@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from accrue_ui.server.app import create_app
 from accrue_ui.server.events import (
     FLUSH_INTERVAL_S,
@@ -158,14 +160,31 @@ def test_drain_coalesces_to_latest_cell_state():
 def test_drain_stats_carries_only_changed_keys():
     index = _index_for(_start_records())
     index.drain_delta()  # prime the baseline
-    index.apply(TailRecord(0, 1, row("fetch", 0, 1.0)))
+    # Past the throughput floor, so a rate exists to report at all.
+    index.apply(TailRecord(0, 1, row("fetch", 0, 10.0)))
     delta = index.drain_delta()
     assert delta is not None
     stats = delta["stats"]
-    assert "throughput_per_min" in stats  # 0 -> >0: changed
+    assert "throughput_per_min" in stats  # null -> a number: changed
     assert "errors" not in stats  # still 0: unchanged
     assert "spend" not in stats  # still null: unchanged
     assert "cache_hit_rate" not in stats  # still 0.0: unchanged
+
+
+def test_throughput_is_null_until_the_log_has_time_in_it():
+    """A rate over the first milliseconds of a run is noise, not throughput."""
+    index = _index_for(_start_records())
+    index.apply(TailRecord(0, 1, row("fetch", 0, 0.01)))
+    index.apply(TailRecord(0, 1, row("fetch", 1, 0.02)))
+    stats = index.snapshot()["stats"]
+    assert stats["throughput_per_min"] is None  # not 6000/min
+    assert stats["eta_s"] is None  # and no ETA derived from it
+
+    index.apply(TailRecord(0, 1, row("fetch", 2, 30.0)))
+    stats = index.snapshot()["stats"]
+    # 3 completions over 30s of log time -> 6/min, and an ETA from that.
+    assert stats["throughput_per_min"] == pytest.approx(6.0)
+    assert stats["eta_s"] == pytest.approx((5 - 3) / 6.0 * 60.0)
 
 
 def test_flush_interval_pins_10hz_bound():

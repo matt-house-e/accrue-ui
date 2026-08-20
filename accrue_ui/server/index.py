@@ -25,10 +25,10 @@ disappears once its last row does.
 from __future__ import annotations
 
 import base64
-import bisect
 import json
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +48,16 @@ BURST_MIN_COUNT = 10
 BURST_MAX_SPAN_S = 240.0
 LIVE_MTIME_WINDOW_S = 5.0
 THROUGHPUT_WINDOW_S = 60.0
+#: Floor on the throughput divisor. Dividing a handful of completions by the
+#: first fraction of a second of log time reports thousands of rows/min and
+#: an ETA to match; below this much log time there is no honest rate to give.
+THROUGHPUT_MIN_WINDOW_S = 5.0
+#: Row indices this large are treated as corrupt when the log never declared
+#: a row count: the grid is rows x steps bytes, so one bogus index would
+#: otherwise allocate gigabytes.
+ROW_INDEX_CAP = 1_000_000
+#: Raw records kept per cell (newest first out of the log, oldest dropped).
+MAX_CELL_EVENTS = 50
 SCHEMA_V = 1
 
 
@@ -152,6 +162,7 @@ class RunIndex:
 
         self._steps: list[StepState] = []
         self._step_idx: dict[str, int] = {}
+        self._declared_rows: int | None = None  # pipeline_start's num_rows
         self._nrows = 0
         self._cells = bytearray()
         # Terminal cells per row + the count of fully-done rows, maintained
@@ -161,7 +172,10 @@ class RunIndex:
         self._row_keys: dict[int, str] = {}  # values-derived heuristic labels
         self._row_keys_explicit: dict[int, str] = {}  # from row_complete "key"
         self._error_groups: dict[tuple[str, str], ErrorGroup] = {}
-        self._completion_ts: list[float] = []  # non-decreasing (log guarantee)
+        # Completion log-times inside the throughput window, non-decreasing
+        # (log guarantee). Trimmed from the left on every append, so a
+        # million-row run holds a window's worth, not a million floats.
+        self._completion_ts: deque[float] = deque()
         self._old_nsteps = 0  # column count the cells array was laid out with
         # --- SSE delta tracking (drained by the coalescer, see drain_delta) --
         self._dirty_cells: dict[tuple[int, int], int] = {}  # (row, step) -> state
@@ -233,6 +247,18 @@ class RunIndex:
     def _map_mode(mode: Any) -> str:
         return "batch" if mode == "batch" else "live"
 
+    @property
+    def _row_limit(self) -> int:
+        """One past the highest row index this log is allowed to mention.
+
+        The declared ``num_rows`` when there is one, else a hard cap. The
+        cell grid is ``rows * steps`` bytes, so a single corrupt index
+        (``row: 50000000``) would otherwise resize it to gigabytes.
+        """
+        if self._declared_rows is not None:
+            return self._declared_rows
+        return ROW_INDEX_CAP
+
     # ----------------------------------------------------------------- apply
 
     def apply(self, record: TailRecord) -> None:
@@ -261,12 +287,7 @@ class RunIndex:
             self.schema_v = v
         plan = data.get("plan")
         self.plan = plan if isinstance(plan, dict) else None
-        started = data.get("started_at")
-        if isinstance(started, str):
-            try:
-                self.started_at = datetime.fromisoformat(started)
-            except ValueError:
-                self.started_at = None
+        self.started_at = _parse_iso(data.get("started_at"))
         for spec in data.get("steps") or []:
             name = spec.get("name")
             if not isinstance(name, str):
@@ -276,7 +297,8 @@ class RunIndex:
             step.mode = self._map_mode(spec.get("mode"))
             step.model = spec.get("model")
         num_rows = data.get("num_rows")
-        if isinstance(num_rows, int):
+        if isinstance(num_rows, int) and 0 <= num_rows <= ROW_INDEX_CAP:
+            self._declared_rows = num_rows
             self._ensure_dims(nrows=num_rows)
             for step in self._steps:
                 step.total = step.total or num_rows
@@ -289,7 +311,7 @@ class RunIndex:
         step.level = int(data.get("level") or step.level)
         step.mode = self._map_mode(data.get("mode"))
         num_rows = data.get("num_rows")
-        if isinstance(num_rows, int):
+        if isinstance(num_rows, int) and 0 <= num_rows <= self._row_limit:
             # A retry segment re-opens the step with only the retried rows;
             # the grid still has the whole run in it, so totals never shrink.
             step.total = max(step.total, num_rows)
@@ -300,6 +322,11 @@ class RunIndex:
         name = data.get("step")
         row = data.get("row")
         if not isinstance(name, str) or not isinstance(row, int) or row < 0:
+            return
+        if row >= self._row_limit:
+            # Beyond what the run declared (or beyond any plausible run):
+            # a corrupt index, not a row. Sizing the grid to it would
+            # allocate a 50M-cell array for one bad line.
             return
         step = self._step(name)
         self._ensure_dims(row=row)
@@ -344,7 +371,7 @@ class RunIndex:
 
         t = data.get("t")
         t = float(t) if isinstance(t, (int, float)) else self.last_t
-        self._completion_ts.append(t)
+        self._trim_completions(t)
 
         values = data.get("values")
         values = values if isinstance(values, dict) else None
@@ -366,6 +393,11 @@ class RunIndex:
         cell.values = values
         cell.preview = self._render_preview(state, values, error)
         cell.events.append((record.offset, record.length))
+        if len(cell.events) > MAX_CELL_EVENTS:
+            # A pathological log (or a cell retried hundreds of times) must
+            # not grow this list forever; the inspector wants the recent
+            # attempts, not all of them.
+            del cell.events[:-MAX_CELL_EVENTS]
 
         # Row label: an explicit "key" field (additive in core, string|null)
         # wins over the values-derived heuristic; logs without it still label
@@ -415,6 +447,14 @@ class RunIndex:
             if not group.message:
                 group.message = str((error or {}).get("msg") or "")
             group.rows[row] = t
+
+    def _trim_completions(self, t: float) -> None:
+        """Record a completion at log-time *t*, dropping ones out of window."""
+        ts = self._completion_ts
+        ts.append(t)
+        cutoff = t - THROUGHPUT_WINDOW_S
+        while ts and ts[0] < cutoff:
+            ts.popleft()
 
     def _forget_error(self, step_name: str, row: int, cell: Cell | None) -> None:
         """Drop *row* from the group its previous failure belonged to.
@@ -506,20 +546,28 @@ class RunIndex:
         }
 
     def is_live(self) -> bool:
-        """Recently written, or the log never saw its pipeline_end."""
+        """Was the log written to just now? That is the whole definition.
+
+        Emphatically NOT "or it never saw a pipeline_end": a run killed
+        three days ago has no pipeline_end and never will, and pulsing LIVE
+        at it forever is a lie the whole UI then builds on (a climbing
+        elapsed clock, an ETA, a throughput number).
+        """
         try:
             mtime = os.stat(self.path).st_mtime
         except OSError:
-            mtime = 0.0
-        recently_written = (time.time() - mtime) < LIVE_MTIME_WINDOW_S
-        return recently_written or not self.finished
+            return False
+        return (time.time() - mtime) < LIVE_MTIME_WINDOW_S
 
     def _elapsed_s(self) -> float:
+        """Wall-clock for a live run; the log's own span for a dead one."""
         if self.finished and self.final_elapsed_s is not None:
             return self.final_elapsed_s
-        if self.started_at is not None:
+        if self.started_at is not None and self.is_live():
             started = self.started_at.astimezone(timezone.utc)
             return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+        # Interrupted and long cold: the run lasted until its last record,
+        # not until now.
         return self.last_t
 
     def _stats_block(self, cost: dict[str, Any]) -> dict[str, Any]:
@@ -532,7 +580,7 @@ class RunIndex:
         remaining = max(0, total_cells - total_done)
         if self.finished:
             eta_s: float | None = 0.0
-        elif throughput > 0:
+        elif throughput:
             eta_s = remaining / (throughput / 60.0)
         else:
             eta_s = None
@@ -625,16 +673,25 @@ class RunIndex:
             "steps": steps,
         }
 
-    def _throughput_per_min(self) -> float:
+    def _throughput_per_min(self) -> float | None:
+        """Completions per minute over the recent window, or None if unknowable.
+
+        The divisor is log time, floored at THROUGHPUT_MIN_WINDOW_S: the
+        first few completions of a run land within milliseconds of each
+        other, and dividing by that reports a rate of tens of thousands per
+        minute (and an ETA of seconds for an hour-long run). Until the log
+        has that much time in it there is no rate to report, so the tile
+        shows an em-dash rather than a fantasy.
+        """
         ts = self._completion_ts
         if not ts:
-            return 0.0
-        newest = ts[-1]
-        window = min(THROUGHPUT_WINDOW_S, newest) or newest
-        if window <= 0:
-            return 0.0
-        count = len(ts) - bisect.bisect_left(ts, newest - window)
-        return count / window * 60.0
+            return None
+        window = min(THROUGHPUT_WINDOW_S, ts[-1])
+        if window < THROUGHPUT_MIN_WINDOW_S:
+            return None
+        # The deque holds exactly the window (trimmed on append), so its
+        # length is the count — no scan, no bisect.
+        return len(ts) / window * 60.0
 
     def _error_groups_block(self) -> list[dict[str, Any]]:
         groups = sorted(self._error_groups.values(), key=lambda g: -g.count)
@@ -818,6 +875,21 @@ def _error_type(error: dict[str, Any] | None) -> str:
     return str((error or {}).get("type") or "Error")
 
 
+def _parse_iso(raw: Any) -> datetime | None:
+    """Parse a log timestamp, tolerating the ``Z`` suffix.
+
+    ``datetime.fromisoformat`` only learned ``Z`` in 3.11 and this package
+    supports 3.10 — and Z-form is exactly what the fixtures (and any emitter
+    using ``isoformat().replace("+00:00", "Z")``) write.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _one_line(text: str) -> str:
     return " ".join(text.split())
 
@@ -890,14 +962,12 @@ def scan_runs(directory: str | Path) -> list[dict[str, Any]]:
         run_id = path.stem
         if first and first.get("type") == "pipeline_start":
             run_id = first.get("run_id") or run_id
-            raw = first.get("started_at")
-            if isinstance(raw, str):
-                try:
-                    started_at = _iso_utc(datetime.fromisoformat(raw))
-                except ValueError:
-                    started_at = None
-        ended = _last_record_is_pipeline_end(path)
-        live = (time.time() - st.st_mtime) < LIVE_MTIME_WINDOW_S or not ended
+            parsed = _parse_iso(first.get("started_at"))
+            started_at = _iso_utc(parsed) if parsed else None
+        # Live means "being written to right now" — same rule as
+        # RunIndex.is_live(), and for the same reason (an interrupted run
+        # has no pipeline_end and is not live because of it).
+        live = (time.time() - st.st_mtime) < LIVE_MTIME_WINDOW_S
         mtime_iso = _iso_utc(datetime.fromtimestamp(st.st_mtime, tz=timezone.utc))
         runs.append(
             {
@@ -926,23 +996,3 @@ def _read_first_record(path: Path) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def _last_record_is_pipeline_end(path: Path) -> bool:
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - (1 << 16)))
-            chunk = f.read()
-    except OSError:
-        return False
-    for line in reversed(chunk.splitlines()):
-        if not line.strip():
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            return False
-        return isinstance(parsed, dict) and parsed.get("type") == "pipeline_end"
-    return False
