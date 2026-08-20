@@ -68,6 +68,19 @@ function RunChip({ run }) {
   </button>`;
 }
 
+// Trigger the report download. Same-origin GET, so the HttpOnly launch-token
+// cookie authenticates it (no header to attach); the endpoint answers with
+// Content-Disposition: attachment, so the browser saves <run_id>.html rather
+// than navigating away from the dashboard.
+function exportReport() {
+  const a = document.createElement("a");
+  a.href = "/api/report";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 function TopBar({ snap }) {
   const run = snap.run;
   return html`<header class="topbar">
@@ -75,6 +88,13 @@ function TopBar({ snap }) {
     <span class="app-title">accrue watch</span>
     <${RunChip} run=${run} />
     <span class="spacer"></span>
+    <button
+      class="export-btn"
+      onClick=${exportReport}
+      title="Download a self-contained HTML report of this run"
+    >
+      Export report
+    </button>
     ${run.live &&
     html`<span class="live-badge">
       <span class="live-dot pulse"></span>LIVE

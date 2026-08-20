@@ -17,10 +17,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .events import DeltaBroadcaster
 from .index import RunIndex, scan_runs
+from .report import render_report, report_filename
 from .retry import ALREADY_RUNNING, RetryController
 
 SSE_KEEPALIVE_INTERVAL_S = 15.0
@@ -58,6 +59,29 @@ async def get_cell(request: Request, step: str, row: int) -> dict:
 async def get_runs(request: Request) -> dict:
     """Known run logs (siblings of the served log), newest first."""
     return {"runs": scan_runs(request.app.state.run_path.parent)}
+
+
+@router.get("/report")
+async def get_report(request: Request) -> HTMLResponse:
+    """Self-contained HTML report of the served run, as a file download.
+
+    Rendered from the same in-memory RunIndex the dashboard holds (see
+    ``report.py``): one file, all CSS inlined, no external references, no
+    JavaScript — it opens offline from ``file://``. Delivered as an
+    ``attachment`` so the browser saves ``<run_id>.html`` rather than
+    navigating. This route lives under ``/api/*``, so the launch-token +
+    Origin/Host middleware guards it exactly like every other API route.
+    """
+    index = _index(request)
+    document = render_report(index)
+    filename = report_filename(index)
+    return HTMLResponse(
+        content=document,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/events")

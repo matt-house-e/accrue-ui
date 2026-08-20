@@ -275,19 +275,43 @@ at most every 100ms, however fast the log grows). Each `data:` payload:
   "t": 402.6,                      // seconds since run start
   "cells": [[1283, 1, 2]],         // [row, stepIndex, newState] triples;
                                    // stepIndex = index into /api/run steps
-  "stats": { "spend": 4.84, "rows_done": 3413 },  // ONLY the keys that changed
-                                   // (subset of /api/run "stats", plus
-                                   // "rows_done"); may be {}
+  "stats": { "spend": 4.84, "rows_done": 3413, "live": true },  // ONLY the
+                                   // keys that changed (subset of /api/run
+                                   // "stats", plus "rows_done" and "live");
+                                   // may be {}
   "steps": [                       // ONLY steps whose counters changed; may be []
     { "name": "web_search", "done": 4391, "errors": 38 }
-  ]
+  ],
+  "reset": true                    // OPTIONAL, absent = false. The server
+                                   // rebuilt its index (truncate-and-regrow);
+                                   // see below.
 }
 ```
 
-`stats.rows_done` is the one delta-only key: it mirrors the snapshot's
-`rows.done` (rows complete through the last step), which lives outside
-`stats` in `/api/run` but rides along here so the progress tile tracks a
-live run — or a retry healing cells — without refetching the snapshot.
+`stats.rows_done` and `stats.live` are the two delta-only keys, each mirroring
+a field that lives outside `stats` in `/api/run` so it can ride the stream:
+
+- `stats.rows_done` mirrors the snapshot's `rows.done` (rows complete through
+  the last step) so the progress tile tracks a live run — or a retry healing
+  cells — without refetching the snapshot.
+- `stats.live` mirrors `run.live` (mtime recency). It is included only when it
+  changes, so a run that **finishes while the page is open** emits one delta
+  carrying `"live": false` a few seconds after its last write — the client
+  clears the LIVE badge and stops the elapsed ticker without refetching.
+  Backward-compatible: a consumer that ignores it simply keeps its snapshot's
+  `run.live`.
+
+`reset` is an **optional** boolean, absent (i.e. false) on every ordinary
+delta. The server sets it on the first delta published after it rebuilds its
+in-memory index — which happens when the follower detects the log was
+**truncated and regrown** (a new run written over the same path; the tail's
+generation bumps). After such a rebuild, cells that existed only in the old
+file are still *in-grid*, so a client cannot gap-detect them (a gap is an
+out-of-grid row/step index). A `reset` delta tells the client its whole
+snapshot is stale: it must **refetch `/api/run` wholesale**, not just
+gap-refetch. The flag survives delta coalescing (a slow client's merged
+payload keeps `reset` if either half set it). Older clients that do not know
+the key fall back to their existing gap-refetch heuristic.
 
 Deltas are **state, not a journal**: a cell that changed several times
 between flushes appears once with its latest state, and `stats`/`steps`
@@ -298,9 +322,9 @@ per-client memory is bounded by the grid size.
 Clients merge deltas into the `/api/run` snapshot. **Connect race:** a delta
 published between a client's `/api/run` fetch and its EventSource attaching
 is not replayed — the stream continues from live state. A client that
-detects a gap (a delta referencing rows or steps outside its known grid)
-should re-fetch `/api/run`; payloads are idempotent state, so re-applying
-deltas after the refetch is safe.
+detects a gap (a delta referencing rows or steps outside its known grid) —
+**or receives a `reset` delta** — should re-fetch `/api/run`; payloads are
+idempotent state, so re-applying deltas after the refetch is safe.
 
 Keepalive comment lines (`: ...`) may appear at any time; the stream opens
 with a `: connected` comment. `tests/fixtures/api/events_sample.ndjson`
@@ -371,3 +395,26 @@ Known run logs, newest first.
 `name` and `id` are frequently the same string (a log named after its run).
 Clients should show `name / id` only when they differ, and the id alone
 otherwise.
+
+## `GET /api/report`
+
+A **self-contained static HTML report** of the served run, for handing a
+stakeholder a shareable artifact. Not JSON: the response is
+`text/html; charset=utf-8` with
+
+```
+Content-Disposition: attachment; filename="<run_id>.html"
+```
+
+so a browser saves it rather than navigating. The toolbar's "Export report"
+button triggers the download with a same-origin GET (the launch-token cookie
+authenticates it — this route sits under `/api/*`, so the same security
+middleware guards it as every other API route).
+
+The document is rendered server-side from the same in-memory index that backs
+`/api/run` (steps, cell states, per-step and total cost, error groups,
+timings) — no new accrue core release is involved. It is **fully offline**:
+one file, all CSS inlined, all data embedded in the markup, **no external
+references** (no CDN scripts, no Google Fonts link, no remote images) and no
+JavaScript, so it opens from `file://` with no server and is CSP-clean. It
+reflects the run at the moment of export; it does not update.

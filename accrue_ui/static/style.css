@@ -203,6 +203,21 @@ button:disabled { cursor: not-allowed; }
   font: 500 13px/1 var(--font-mono);
   color: var(--muted);
 }
+.export-btn {
+  flex: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+  background: var(--component);
+  font: 500 12px/1 var(--font-sans);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.export-btn:hover {
+  background: var(--hover);
+  border-color: var(--jade-9);
+  color: var(--ink);
+}
 
 /* ---------- tab row ---------- */
 

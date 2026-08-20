@@ -51,9 +51,13 @@ async def _follow(app: FastAPI) -> None:
             # are stale, so start a fresh index. read_available() already
             # returned records from the start of the new file. Re-applying
             # marks everything dirty again, so connected SSE clients converge
-            # on the new file's state at the next flush.
+            # on the new file's state at the next flush. The fresh index is
+            # flagged so that flush carries reset:true — cells that existed
+            # only in the old file are in-grid, so a client cannot gap-detect
+            # them and must refetch the whole snapshot.
             generation = tail.generation
             app.state.index = RunIndex(app.state.run_path, retry=app.state.retry)
+            app.state.index.mark_reset()
         for record in records:
             app.state.index.apply(record)
         if not records:
