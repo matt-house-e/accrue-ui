@@ -56,30 +56,53 @@ def run_log(tmp_path: Path) -> Path:
     return log
 
 
+class DummySocket:
+    """Stand-in for the pre-bound listening socket (nothing is bound)."""
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @pytest.fixture
 def captured(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Spy on main()'s collaborators; the dummy server never binds a port."""
-    calls: dict = {"browser": [], "served": 0}
+    calls: dict = {"browser": [], "served": 0, "order": []}
     real_create_app = cli.create_app
 
     def spy_create_app(path, **kwargs):
         calls["log"] = Path(path)
         calls["app"] = real_create_app(path, **kwargs)
+        calls["create_kwargs"] = kwargs
         return calls["app"]
 
     class DummyServer:
-        def run(self) -> None:
+        def run(self, sockets=None) -> None:
             calls["served"] += 1
+            calls["sockets"] = sockets
 
     def fake_make_server(app, port):
         calls["port"] = port
         return DummyServer()
 
+    def fake_bind(port: int) -> DummySocket:
+        calls["order"].append("bind")
+        calls["bound"] = port
+        sock = DummySocket(port)
+        calls["socket"] = sock
+        return sock
+
+    def fake_open(url: str) -> None:
+        calls["order"].append("browser")
+        calls["browser"].append(url)
+
     monkeypatch.setattr(cli, "create_app", spy_create_app)
     monkeypatch.setattr(cli, "make_server", fake_make_server)
-    monkeypatch.setattr(
-        cli.webbrowser, "open", lambda url: calls["browser"].append(url)
-    )
+    monkeypatch.setattr(cli, "bind_loopback", fake_bind)
+    monkeypatch.setattr(cli.webbrowser, "open", fake_open)
     return calls
 
 
@@ -174,6 +197,55 @@ def test_browser_opens_by_default(run_log: Path, captured: dict, capsys):
     assert cli.main([str(run_log)]) == 0
     url, _port, _token = _printed_url(capsys)
     assert captured["browser"] == [url]
+    # The port is ours before the token goes anywhere near a browser.
+    assert captured["order"] == ["bind", "browser"]
+
+
+def test_port_is_bound_before_anything_is_served(run_log: Path, captured: dict):
+    assert cli.main([str(run_log), "--no-browser", "--port", "7777"]) == 0
+    assert captured["bound"] == 7777
+    # uvicorn serves the socket we already hold, it does not bind its own.
+    assert captured["sockets"] == [captured["socket"]]
+    assert captured["socket"].closed is True  # released on the way out
+
+
+def test_port_reaches_the_app_for_the_origin_check(run_log: Path, captured: dict):
+    """The Origin check needs the port, so create_app must be told it."""
+    assert cli.main([str(run_log), "--no-browser", "--port", "7777"]) == 0
+    assert captured["create_kwargs"]["port"] == 7777
+
+
+def test_occupied_port_exits_1_without_leaking_the_token(
+    run_log: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """A port squatter must not receive the launch URL.
+
+    Regression: the URL used to be printed (and opened) before uvicorn ever
+    tried to bind, so whoever already held the port got the token.
+    """
+    opened: list[str] = []
+    served: list[int] = []
+    monkeypatch.setattr(cli.webbrowser, "open", opened.append)
+    monkeypatch.setattr(
+        cli, "make_server", lambda app, port: served.append(port) or None
+    )
+
+    squatter = socket.socket()
+    squatter.bind(("127.0.0.1", 0))
+    squatter.listen(1)
+    port = squatter.getsockname()[1]
+    try:
+        rc = cli.main([str(run_log), "--port", str(port)])
+    finally:
+        squatter.close()
+
+    assert rc == 1
+    captured_io = capsys.readouterr()
+    assert "token" not in captured_io.out
+    assert "→" not in captured_io.out
+    assert "cannot bind" in captured_io.err
+    assert opened == []
+    assert served == []
 
 
 def test_no_browser_suppresses_webbrowser(run_log: Path, captured: dict):
@@ -209,18 +281,24 @@ def test_pipeline_and_data_specs_reach_the_retry_controller(
 
 
 def test_security_regression_with_cli_built_app(run_log: Path, captured: dict, capsys):
-    assert cli.main([str(run_log), "--no-browser"]) == 0
+    assert cli.main([str(run_log), "--no-browser", "--port", "7607"]) == 0
     _url, _port, token = _printed_url(capsys)
     app = captured["app"]
-    with TestClient(app, base_url="http://localhost") as client:
+    own = "http://127.0.0.1:7607"
+    with TestClient(app, base_url=own) as client:
         assert client.get("/api/run").status_code == 401  # no token
         headers = {"X-Accrue-Token": token}
         assert client.get("/api/run", headers=headers).status_code == 200
         evil = {**headers, "Origin": "https://evil.example"}
         assert client.get("/api/run", headers=evil).status_code == 403
+        # Another loopback port is another site, even with a valid token.
+        neighbour = {**headers, "Origin": "http://127.0.0.1:31337"}
+        assert client.get("/api/run", headers=neighbour).status_code == 403
         assert client.get("/api/retry", headers=headers).status_code == 405
         resp = client.post(
-            "/api/retry", headers={**headers, "Origin": "http://localhost"}
+            "/api/retry",
+            json={"all": True},
+            headers={**headers, "Origin": own},
         )
         assert resp.status_code == 409  # retry still refuses: issue #4
         # ?token= page hit sets the cookie, which then auths /api/*.

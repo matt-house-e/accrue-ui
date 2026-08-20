@@ -240,14 +240,25 @@ A `group` selector is resolved against the snapshot's `error_groups` and also
 restricts the retry to that step; `rows` and `all` retry every failed step of
 the rows named.
 
+`Content-Type: application/json` is **required** on every `/api/*` mutation.
+Without it the request would be a CORS "simple request" — no preflight, and
+the launch-token cookie attached automatically — so the server refuses it
+with 415 before the route sees it (`security.py`).
+
+The Origin check compares the **whole origin**, `scheme://host:port`, against
+the server's own. `http://127.0.0.1:7607` and `http://localhost:7607` are the
+same origin as far as it is concerned; `http://127.0.0.1:31337` is a
+different site running on the same loopback interface, and is rejected.
+
 | Status | Body | When |
 |--------|------|------|
 | 202 | `{"accepted": 12}` | Accepted; 12 rows are being retried in the background |
-| 400 | `{"detail": "..."}` | Malformed body, no selector (or more than one), or nothing failed |
-| 401 / 403 | `{"detail": "..."}` | Missing token / non-loopback Origin (see `security.py`) |
+| 400 | `{"detail": "..."}` | Malformed body, no selector (or more than one), a row outside `0..rows.total-1`, or nothing failed |
+| 401 / 403 | `{"detail": "..."}` | Missing token / an Origin that is not this server's (see `security.py`) |
 | 404 | `{"detail": "no error group ..."}` | The named group is not in the index (it may have healed already) |
 | 405 | `{"detail": "Method Not Allowed"}` | Mutations are POST-only |
-| 409 | the `retry` block, `reason` saying why | Retry unavailable, or `"retry already running"` |
+| 409 | the `retry` block, `reason` saying why | Retry unavailable, or `"retry already running"` (the block is read fresh, so `running` is `true` alongside that reason) |
+| 415 | `{"detail": "expected Content-Type: application/json"}` | The body was not declared as JSON |
 
 Only one retry runs at a time. While it does, `/api/run`'s `retry.running` is
 `true`; when the task itself fails (bad checkpoint, pipeline raised), the

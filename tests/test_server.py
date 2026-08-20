@@ -335,7 +335,9 @@ def test_static_mounted_after_api(feature_log: Path):
 
 def test_retry_stub_returns_409(feature_log: Path):
     with client_for(feature_log) as client:
-        resp = client.post("/api/retry", headers={"Origin": "http://localhost"})
+        resp = client.post(
+            "/api/retry", json={"all": True}, headers={"Origin": "http://localhost"}
+        )
     assert resp.status_code == 409
     body = resp.json()
     assert body["available"] is False

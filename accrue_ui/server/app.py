@@ -1,10 +1,15 @@
 """FastAPI app factory.
 
-``create_app(run_path, *, token, allow_origin=None, pipeline=None, data=None)``
-builds the whole read path: security middleware, the API routes, a background
-follower that keeps the shared RunIndex current, a coalescer that flushes SSE
-deltas at most every 100ms, and the static frontend mounted at ``/`` (after
-the API routes, so ``/api/*`` always wins).
+``create_app(run_path, *, token, port=None, allow_origin=None, pipeline=None,
+data=None)`` builds the whole read path: security middleware, the API routes,
+a background follower that keeps the shared RunIndex current, a coalescer
+that flushes SSE deltas at most every 100ms, and the static frontend mounted
+at ``/`` (after the API routes, so ``/api/*`` always wins).
+
+``port`` is the port the server will bind. It is part of the app's identity,
+not just the runner's: the Origin check compares the *whole* origin
+(``scheme://host:port``), because another local process listening on a
+different loopback port is a different site — see ``security.py``.
 
 ``pipeline`` / ``data`` are the ``module:attr`` specs from the CLI. They are
 imported once during startup (see ``retry.py``); whatever happens — success
@@ -73,6 +78,7 @@ def create_app(
     run_path: str | Path,
     *,
     token: str,
+    port: int | None = None,
     allow_origin: str | None = None,
     pipeline: str | None = None,
     data: str | None = None,
@@ -115,7 +121,7 @@ def create_app(
     # Set before startup so a caller can inspect the retry specs (and the
     # reason they failed to import) without running the lifespan.
     app.state.retry = retry
-    install_security(app, token=token, allow_origin=allow_origin)
+    install_security(app, token=token, port=port, allow_origin=allow_origin)
     app.include_router(router)
     # Static frontend mounts last so /api/* is matched first.
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

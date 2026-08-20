@@ -8,7 +8,12 @@ regardless of query params; ``/api/events`` replays the sample deltas as SSE
 then holds the connection open. Stdlib only; requires a repo checkout (the
 fixtures are not packaged).
 
-Usage: python -m accrue_ui.devstub [--port 7607]
+**It lives outside ``accrue_ui/`` on purpose.** There is no launch token,
+no Origin check and no Host check in here — every route answers anyone who
+asks. Keeping it in ``tools/`` keeps it out of the wheel, so an installed
+accrue-ui cannot be talked into starting it.
+
+Usage: python tools/devstub.py [--port 7607]
 """
 
 from __future__ import annotations
@@ -18,8 +23,9 @@ import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-STATIC = Path(__file__).resolve().parent / "static"
-FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "api"
+ROOT = Path(__file__).resolve().parents[1]
+STATIC = ROOT / "accrue_ui" / "static"
+FIXTURES = ROOT / "tests" / "fixtures" / "api"
 
 
 class StubHandler(SimpleHTTPRequestHandler):

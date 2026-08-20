@@ -204,12 +204,35 @@ function StatsStrip({ snap }) {
   </div>`;
 }
 
+// The launch token arrives as ?token=… and is exchanged for an HttpOnly
+// cookie by the first page hit. Once the snapshot proves the cookie works,
+// drop it from the address bar so it stops riding along in copy-pasted
+// links, bookmarks and the browser's own history.
+function scrubTokenFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("token")) return;
+    url.searchParams.delete("token");
+    const query = url.searchParams.toString();
+    window.history.replaceState(
+      null,
+      "",
+      `${url.pathname}${query ? `?${query}` : ""}${url.hash}`
+    );
+  } catch {
+    // No history API (or an exotic URL): leaving it visible is not fatal.
+  }
+}
+
 function App() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
     loadRun()
-      .then(() => connect())
+      .then(() => {
+        scrubTokenFromUrl();
+        connect();
+      })
       .catch((e) => setError(String(e)));
   }, []);
 

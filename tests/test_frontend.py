@@ -63,7 +63,7 @@ def stub_url():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "accrue_ui.devstub", "--port", str(port)],
+        [sys.executable, str(ROOT / "tools" / "devstub.py"), "--port", str(port)],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -316,6 +316,22 @@ def test_retry_buttons_are_wired_to_the_endpoint():
     inspector = (STATIC / "views" / "inspector.js").read_text()
     assert "postRetry({ rows: [sel.row] }" in inspector
     assert "retryBusy()" in inspector
+
+
+def test_launch_token_is_scrubbed_from_the_address_bar():
+    """?token= is exchanged for a cookie at boot; it must not linger in the URL."""
+    app_js = (STATIC / "app.js").read_text()
+    assert "history.replaceState" in app_js
+    assert 'searchParams.delete("token")' in app_js
+
+
+def test_devstub_is_not_inside_the_package():
+    """The stub has no auth at all — it must never ship in the wheel."""
+    assert not (ROOT / "accrue_ui" / "devstub.py").exists()
+    assert (ROOT / "tools" / "devstub.py").is_file()
+    pyproject = (ROOT / "pyproject.toml").read_text()
+    assert 'include = ["accrue_ui*"]' in pyproject
+    assert '"tools*"' in pyproject
 
 
 def test_retry_note_uses_existing_error_tokens():

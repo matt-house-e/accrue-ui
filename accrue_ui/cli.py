@@ -3,9 +3,14 @@
 ``accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--port 7607]
 [--no-browser]`` resolves the run log (explicit path, else the newest
 ``*.jsonl`` under ``./.accrue/runs``), generates a fresh URL-safe launch
-token, builds the server app, prints the tokenized URL, opens the browser,
-and serves with uvicorn bound to **127.0.0.1 only** — hardcoded, no flag to
+token, builds the server app, **binds the loopback port**, and only then
+prints the tokenized URL and opens the browser — uvicorn serves on the
+socket already in hand, bound to **127.0.0.1 only**, hardcoded, no flag to
 widen it (see ``server/security.py`` for the threat model).
+
+Binding first is a security requirement, not tidiness: the URL carries the
+launch token, so printing it before the port is ours would hand that token
+to whatever process got there first (see :func:`bind_loopback`).
 
 ``--pipeline`` (plus ``--data`` when it names a Pipeline rather than a
 factory) is what makes retry possible; see ``server/retry.py`` for the
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import secrets
+import socket
 import sys
 import webbrowser
 from pathlib import Path
@@ -94,6 +100,30 @@ def make_server(app: FastAPI, port: int) -> uvicorn.Server:
     return uvicorn.Server(config)
 
 
+def bind_loopback(port: int) -> socket.socket:
+    """Listen on ``127.0.0.1:port`` and return the socket, or raise OSError.
+
+    Called **before** the tokenized URL is printed or opened. Uvicorn would
+    otherwise bind inside ``server.run()``, long after the token is on the
+    user's screen and in their browser — and if the port were already taken
+    by another local process, that URL would name *its* server, handing the
+    launch token to a squatter. Binding first turns that into a clean
+    "port in use" exit with nothing leaked.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # TIME_WAIT reuse only — this never lets a live listener share the
+        # port, so a squatter still fails the bind (which is the point).
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((HOST, port))
+        sock.listen(2048)
+    except OSError:
+        sock.close()
+        raise
+    sock.set_inheritable(True)
+    return sock
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -116,14 +146,34 @@ def main(argv: list[str] | None = None) -> int:
     token = secrets.token_urlsafe(32)
     # The specs are imported during app startup, not here: a bad --pipeline
     # is reported in the UI (retry.reason) rather than killing the server.
-    app = create_app(run_log, token=token, pipeline=args.pipeline, data=args.data)
+    app = create_app(
+        run_log,
+        token=token,
+        port=args.port,
+        pipeline=args.pipeline,
+        data=args.data,
+    )
+
+    # Bind BEFORE the token is printed or opened — see bind_loopback().
+    try:
+        sock = bind_loopback(args.port)
+    except OSError as exc:
+        print(
+            f"accrue-ui: cannot bind {HOST}:{args.port} ({exc}) — "
+            "another server already has it. Try --port.",
+            file=sys.stderr,
+        )
+        return 1
 
     url = f"http://{HOST}:{args.port}/?token={token}"
     print(f"→ {url}", flush=True)
     if not args.no_browser:
         webbrowser.open(url)
 
-    make_server(app, args.port).run()
+    try:
+        make_server(app, args.port).run(sockets=[sock])
+    finally:
+        sock.close()
     return 0
 
 

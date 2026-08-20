@@ -640,7 +640,11 @@ def test_post_retry_rejects_a_non_json_body(tmp_path: Path, write_module):
     log = _failing_log(tmp_path)
     _mod, client = _retry_client(log, write_module)
     with client:
-        resp = client.post("/api/retry", content=b"not json", headers=ORIGIN)
+        resp = client.post(
+            "/api/retry",
+            content=b"not json",
+            headers={**ORIGIN, "Content-Type": "application/json"},
+        )
     assert resp.status_code == 400
 
 
