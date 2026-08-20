@@ -27,12 +27,18 @@ def merge_deltas(base: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     cells.update({(r, s): state for r, s, state in new["cells"]})
     steps = {s["name"]: s for s in base["steps"]}
     steps.update({s["name"]: s for s in new["steps"]})
-    return {
+    merged = {
         "t": new["t"],
         "cells": [[r, s, state] for (r, s), state in cells.items()],
         "stats": {**base["stats"], **new["stats"]},
         "steps": list(steps.values()),
     }
+    # A reset must survive coalescing into a slow client's pending payload:
+    # dropping it would leave that client on the pre-reindex grid. Absent
+    # means false, so only carry it forward when either side set it.
+    if base.get("reset") or new.get("reset"):
+        merged["reset"] = True
+    return merged
 
 
 class SSEClient:

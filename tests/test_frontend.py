@@ -296,8 +296,8 @@ def test_events_fixture_shape():
             _row, step_index, state = cell
             assert 0 <= step_index < nsteps
             assert 0 <= state <= 6
-        # rows_done is the one delta-only stats key (docs/api-shapes.md).
-        assert set(delta["stats"]) <= stats_keys | {"rows_done"}
+        # rows_done and live are the delta-only stats keys (docs/api-shapes.md).
+        assert set(delta["stats"]) <= stats_keys | {"rows_done", "live"}
         for step in delta["steps"]:
             assert set(step) == {"name", "done", "errors"}
             assert step["name"] in step_names
@@ -321,6 +321,48 @@ def test_retry_buttons_are_wired_to_the_endpoint():
     inspector = (STATIC / "views" / "inspector.js").read_text()
     assert "postRetry({ rows: [sel.row] }" in inspector
     assert "retryBusy()" in inspector
+
+
+def test_delta_reset_triggers_a_full_snapshot_refetch():
+    """A reset delta (truncate-and-regrow reindex) must refetch /api/run whole,
+    not merely gap-refetch — stale in-grid cells are not gap-detectable."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    body = store.split("export function applyDelta", 1)[1]
+    # The reset branch is handled before (and separately from) cell merging …
+    assert body.index("if (delta.reset)") < body.index("delta.cells")
+    # … refetches the whole snapshot and short-circuits the stale merge.
+    reset_region = body.split("if (delta.reset)", 1)[1].split("let gap", 1)[0]
+    assert "loadRun()" in reset_region
+    assert "return;" in reset_region
+
+
+def test_delta_live_clears_the_badge_and_stops_the_ticker():
+    """live is a delta-only stat that drives run.live, which app.js reads for
+    both the LIVE badge and the elapsed ticker."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    # Pulled out of stats alongside rows_done, then written to run.live.
+    assert "rows_done: rowsDone, live," in store
+    body = store.split('typeof live === "boolean"', 1)[1]
+    assert "run: { ...snapshot.value.run, live }" in body
+    # The ticker and badge both key off run.live (already the case in app.js).
+    app_js = (STATIC / "app.js").read_text()
+    assert "snap.run.live) elapsedS.value++" in app_js
+    assert "${run.live &&" in app_js
+
+
+def test_export_report_button_downloads_from_the_endpoint():
+    """The toolbar action GETs /api/report; same-origin, so the cookie auths."""
+    app_js = (STATIC / "app.js").read_text()
+    assert 'class="export-btn"' in app_js
+    assert "onClick=${exportReport}" in app_js
+    export = app_js.split("function exportReport()", 1)[1].split("}", 1)[0]
+    assert '"/api/report"' in export
+    assert "X-Accrue-Token" not in export  # same-origin GET: the cookie authenticates
+    # No fetch/blob dance needed — Content-Disposition drives the save.
+    css = (STATIC / "style.css").read_text()
+    assert ".export-btn" in css
+    block = css.split(".export-btn {", 1)[1].split("}", 1)[0]
+    assert "#" not in block  # colors from the :root token table only
 
 
 def test_launch_token_is_scrubbed_from_the_address_bar():

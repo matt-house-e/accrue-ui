@@ -277,6 +277,22 @@ export function refreshErrorGroups() {
 let gapRefetching = false;
 
 export function applyDelta(delta) {
+  // A reset delta means the server rebuilt its index (truncate-and-regrow):
+  // cells that existed only in the old file are in-grid, so gap detection
+  // cannot catch them — the whole snapshot is stale. Refetch it wholesale
+  // and ignore the rest of this payload; the fresh snapshot is authoritative
+  // and later deltas continue from live state (idempotent).
+  if (delta.reset) {
+    if (!gapRefetching) {
+      gapRefetching = true;
+      loadRun()
+        .catch(() => {})
+        .finally(() => {
+          gapRefetching = false;
+        });
+    }
+    return;
+  }
   let gap = false;
   let errorsMoved = false;
   batch(() => {
@@ -294,9 +310,10 @@ export function applyDelta(delta) {
       cellsVersion.value++;
     }
     if (snap && delta.stats && Object.keys(delta.stats).length) {
-      // rows_done is the one delta-only stats key: it belongs to rows.done
-      // in the snapshot (docs/api-shapes.md, GET /api/events).
-      const { rows_done: rowsDone, ...stats } = delta.stats;
+      // rows_done and live are the delta-only stats keys: they belong to
+      // rows.done and run.live in the snapshot, not stats (docs/api-shapes.md,
+      // GET /api/events). Pull them out before merging the rest into stats.
+      const { rows_done: rowsDone, live, ...stats } = delta.stats;
       errorsMoved =
         typeof stats.errors === "number" && stats.errors !== snap.stats.errors;
       snapshot.value = { ...snapshot.value, stats: { ...snap.stats, ...stats } };
@@ -304,6 +321,14 @@ export function applyDelta(delta) {
         snapshot.value = {
           ...snapshot.value,
           rows: { ...snapshot.value.rows, done: rowsDone },
+        };
+      }
+      if (typeof live === "boolean") {
+        // Clears the LIVE badge and stops the elapsed ticker (app.js reads
+        // run.live) the moment a finished run's log goes cold.
+        snapshot.value = {
+          ...snapshot.value,
+          run: { ...snapshot.value.run, live },
         };
       }
     }

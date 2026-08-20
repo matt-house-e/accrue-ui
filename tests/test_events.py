@@ -23,7 +23,7 @@ from accrue_ui.server.events import (
 )
 from accrue_ui.server.index import RunIndex
 from accrue_ui.server.tail import TailRecord
-from tests.conftest import TOKEN, SSEStream, lifespan_ctx, row, write_log
+from tests.conftest import TOKEN, SSEStream, age_file, lifespan_ctx, row, write_log
 
 PENDING, RUNNING, OK, CACHED, RETRYING, ERROR, SKIPPED = range(7)
 
@@ -98,7 +98,10 @@ def test_first_drain_primes_stats_then_none():
         "eta_s",
         "cache_saved",
         "rows_done",  # delta-only mirror of the snapshot's rows.done
+        "live",  # delta-only mirror of run.live (mtime recency)
     }
+    # A first drain with no reset pending carries no reset key (absent=false).
+    assert "reset" not in first
     # ...and with no changes since, the next drain has nothing to say.
     assert index.drain_delta() is None
 
@@ -169,6 +172,103 @@ def test_drain_stats_carries_only_changed_keys():
     assert "errors" not in stats  # still 0: unchanged
     assert "spend" not in stats  # still null: unchanged
     assert "cache_hit_rate" not in stats  # still 0.0: unchanged
+
+
+def _index_over(path: Path, records: list[dict]) -> RunIndex:
+    """Build an index over a REAL file so is_live()'s mtime check has one."""
+    write_log(path, records)
+    index = RunIndex(path)
+    for record in records:
+        index.apply(TailRecord(0, 1, record))
+    return index
+
+
+# ---- reset flag (issue #11): truncate-and-regrow reindex ------------------
+
+
+def test_mark_reset_makes_the_next_delta_carry_reset_then_clears():
+    index = _index_for(_start_records())
+    index.drain_delta()  # prime the baseline; no reset pending yet
+    index.apply(TailRecord(0, 1, row("fetch", 0, 1.0)))
+
+    index.mark_reset()
+    delta = index.drain_delta()
+    assert delta is not None
+    assert delta["reset"] is True
+    # It is a one-shot: the following delta does not repeat it.
+    index.apply(TailRecord(0, 1, row("fetch", 1, 1.1)))
+    assert "reset" not in index.drain_delta()
+
+
+def test_reset_emits_even_with_no_other_change():
+    """A truncate to a bare pipeline_start must still tell clients to refetch."""
+    index = _index_for(_start_records())
+    index.drain_delta()  # prime; nothing dirty now
+    index.mark_reset()
+    delta = index.drain_delta()  # no cells/steps/stats changed
+    assert delta is not None
+    assert delta["reset"] is True
+
+
+def test_merge_deltas_preserves_a_reset_flag():
+    """A slow client's coalesced payload must not lose the reset signal."""
+    base = _delta(1.0, [[0, 0, OK]], {}, [])
+    base["reset"] = True
+    new = _delta(2.0, [[1, 0, OK]], {}, [])  # no reset
+    merged = merge_deltas(base, new)
+    assert merged["reset"] is True
+    # Symmetric, and absent on both sides means absent in the result.
+    assert merge_deltas(new, base)["reset"] is True
+    assert "reset" not in merge_deltas(new, _delta(3.0, [], {}, []))
+
+
+async def test_events_sends_reset_after_truncate_and_regrow(tmp_path: Path):
+    """A new run written over the same path bumps the tail generation; the
+    server rebuilds its index and the next delta carries reset:true."""
+    log = tmp_path / "live.jsonl"
+    write_log(log, _start_records(num_rows=5))
+    app = create_app(log, token=TOKEN)
+    async with lifespan_ctx(app):
+        stream = SSEStream(app)
+        try:
+            await stream.wait_for(lambda s: s.chunks)  # connected
+            # Regrow in place with a DIFFERENT run (new run_id => new head
+            # signature), which is what the tail keys truncate-detection off.
+            second = _start_records(num_rows=8)
+            second[0] = {**second[0], "run_id": "second-run"}
+            second.append(row("fetch", 0, 1.0))
+            await asyncio.to_thread(write_log, log, second)
+            await stream.wait_for(lambda s: any(d.get("reset") for d in s.deltas))
+            assert any(d.get("reset") is True for d in stream.deltas)
+        finally:
+            await stream.close()
+
+
+# ---- live in delta stats (issue #12): LIVE badge persistence --------------
+
+
+def test_live_is_a_delta_stat_that_flips_false_when_the_log_goes_cold(tmp_path: Path):
+    log = tmp_path / "finishing.jsonl"
+    index = _index_over(log, _start_records())
+    first = index.drain_delta()  # primes stats, including live
+    assert first["stats"]["live"] is True  # file just written -> live
+    assert index.drain_delta() is None  # nothing changed since
+
+    age_file(log)  # backdate mtime past the recency window: the run went cold
+    delta = index.drain_delta()
+    assert delta is not None
+    assert delta["stats"]["live"] is False  # the badge-clearing signal
+    # And it does not keep re-announcing the same value.
+    assert index.drain_delta() is None
+
+
+def test_live_absent_from_the_snapshot_stats_block(tmp_path: Path):
+    """live rides the delta only; /api/run keeps it in run, not stats."""
+    log = tmp_path / "snap.jsonl"
+    index = _index_over(log, _start_records())
+    snap = index.snapshot()
+    assert "live" not in snap["stats"]
+    assert "live" in snap["run"]
 
 
 def test_throughput_is_null_until_the_log_has_time_in_it():

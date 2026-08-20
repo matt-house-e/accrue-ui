@@ -202,6 +202,11 @@ class RunIndex:
         self._dirty_cells: dict[tuple[int, int], int] = {}  # (row, step) -> state
         self._dirty_steps: set[str] = set()
         self._sent_stats: dict[str, Any] = {}  # stats as of the last drain
+        #: Set when this index replaced a truncate-and-regrown one (a tail
+        #: generation bump, see app._follow): the next delta carries
+        #: ``reset: true`` so clients drop their stale grid and refetch the
+        #: whole snapshot rather than only gap-refetching out-of-grid indices.
+        self._reset_pending = False
 
     # ------------------------------------------------------------------ dims
 
@@ -748,18 +753,32 @@ class RunIndex:
 
     # ---------------------------------------------------------------- deltas
 
+    def mark_reset(self) -> None:
+        """Flag the next delta as a reset (truncate-and-regrow reindex).
+
+        Called by the follower when the tail's generation bumped and it built
+        a fresh index over the new file. The next :meth:`drain_delta` then
+        carries ``reset: true`` — the signal a client uses to drop its stale
+        grid and refetch the whole snapshot, since cells that existed only in
+        the old file are in-grid (not gap-detectable) and would otherwise keep
+        their stale bytes.
+        """
+        self._reset_pending = True
+
     def drain_delta(self) -> dict[str, Any] | None:
         """Collect all changes since the last drain into one SSE delta payload.
 
         Coalescing happens here: a cell touched several times between drains
         yields ONE triple carrying its latest state, ``steps`` report current
         counters, and ``stats`` holds only the keys whose value changed since
-        the last drain (plus ``rows_done``, the delta-only mirror of the
-        snapshot's ``rows.done``, so the progress bar tracks a live run
+        the last drain (plus the two delta-only keys, ``rows_done`` — the
+        mirror of the snapshot's ``rows.done`` — and ``live`` — the mirror of
+        ``run.live`` — so the progress bar and the LIVE badge track a live run
         without refetching). The payload is state, not a journal — draining
         resets the accumulators, so memory stays bounded by the grid size no
-        matter how fast the log grows. Returns None when nothing changed.
-        Shape: docs/api-shapes.md, ``GET /api/events``.
+        matter how fast the log grows. Returns None when nothing changed
+        (unless a reset is pending, which always emits). Shape:
+        docs/api-shapes.md, ``GET /api/events``.
         """
         cells = [
             [row, step_i, state] for (row, step_i), state in self._dirty_cells.items()
@@ -769,23 +788,36 @@ class RunIndex:
             for s in self._steps
             if s.name in self._dirty_steps
         ]
-        stats = {**self._stats_block(self._cost_block()), "rows_done": self._rows_done}
+        stats = {
+            **self._stats_block(self._cost_block()),
+            "rows_done": self._rows_done,
+            # Delta-only mirror of run.live: mtime recency, so a run that
+            # finishes with the page open clears its LIVE badge and stops the
+            # elapsed ticker when this flips false, without a snapshot refetch.
+            "live": self.is_live(),
+        }
         changed_stats = {
             k: v
             for k, v in stats.items()
             if k not in self._sent_stats or self._sent_stats[k] != v
         }
-        if not cells and not steps and not changed_stats:
+        reset = self._reset_pending
+        if not cells and not steps and not changed_stats and not reset:
             return None
         self._dirty_cells.clear()
         self._dirty_steps.clear()
         self._sent_stats = stats
-        return {
+        self._reset_pending = False
+        delta: dict[str, Any] = {
             "t": round(self._elapsed_s(), 3),
             "cells": cells,
             "stats": changed_stats,
             "steps": steps,
         }
+        if reset:
+            # Absent means false (backward-compatible); present only when set.
+            delta["reset"] = True
+        return delta
 
     def _throughput_per_min(self) -> float | None:
         """Completions per minute over the recent window, or None if unknowable.
