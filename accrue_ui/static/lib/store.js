@@ -40,6 +40,7 @@ export const cellDetailLoading = signal(false);
 export const elapsedS = signal(0); // ticks locally while run.live
 export const retryPending = signal(false); // POST in flight, before the poll
 export const retryError = signal(null); // {source, message} | null, shown inline
+export const errorGroupsStale = signal(false); // a refetch is on its way
 
 // Row-values cache: rowIndex -> {row, key, cells}. Insertion-ordered Map
 // gives us LRU-ish eviction at the cap.
@@ -251,11 +252,33 @@ export function cycleField(step) {
   fieldChoice.value = { ...fieldChoice.value, [step.name]: next };
 }
 
+// Deltas carry cell states and counters — never error_groups. During a live
+// run the Errors pill (stats.errors) would climb while the triage list still
+// showed the groups from page load. When a delta moves stats.errors, mark
+// the groups stale and pull a fresh snapshot; debounced, so a burst of
+// failures costs one refetch rather than one per flush.
+const ERROR_GROUP_REFRESH_MS = 750;
+let errorGroupRefresh = null;
+
+export function refreshErrorGroups() {
+  errorGroupsStale.value = true;
+  if (errorGroupRefresh) return;
+  errorGroupRefresh = setTimeout(() => {
+    errorGroupRefresh = null;
+    loadRun()
+      .catch(() => {})
+      .finally(() => {
+        errorGroupsStale.value = false;
+      });
+  }, ERROR_GROUP_REFRESH_MS);
+}
+
 // Merge one SSE delta (see docs/api-shapes.md, GET /api/events).
 let gapRefetching = false;
 
 export function applyDelta(delta) {
   let gap = false;
+  let errorsMoved = false;
   batch(() => {
     const snap = snapshot.value;
     const arr = cellStates.value;
@@ -274,6 +297,8 @@ export function applyDelta(delta) {
       // rows_done is the one delta-only stats key: it belongs to rows.done
       // in the snapshot (docs/api-shapes.md, GET /api/events).
       const { rows_done: rowsDone, ...stats } = delta.stats;
+      errorsMoved =
+        typeof stats.errors === "number" && stats.errors !== snap.stats.errors;
       snapshot.value = { ...snapshot.value, stats: { ...snap.stats, ...stats } };
       if (typeof rowsDone === "number") {
         snapshot.value = {
@@ -295,6 +320,7 @@ export function applyDelta(delta) {
       elapsedS.value = Math.floor(delta.t);
     }
   });
+  if (errorsMoved) refreshErrorGroups();
   if (gap && !gapRefetching) {
     // The delta references cells outside our known grid: the snapshot is
     // stale (connect race, or the log was rebuilt) — refetch it. Deltas are

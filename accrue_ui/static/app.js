@@ -75,6 +75,10 @@ function TopBar({ snap }) {
   </header>`;
 }
 
+// Rendered wherever a number is genuinely unknown, never a bare blank and
+// never a fabricated 0 (docs/api-shapes.md: these fields are nullable).
+const DASH = "—";
+
 const FILTERS = [
   ["all", "All rows"],
   ["errors", "Errors only"],
@@ -135,7 +139,7 @@ function TabRow({ snap }) {
         <${IconSearch} />
         <input
           type="text"
-          placeholder="Search keys"
+          placeholder="Search loaded keys…"
           value=${searchQuery.value}
           onInput=${(e) => (searchQuery.value = e.target.value)}
         />
@@ -167,7 +171,10 @@ function StatTile({ label, tip, value, tone = "", bar = null }) {
 function StatsStrip({ snap }) {
   const stats = snap.stats;
   const rows = snap.rows;
+  const live = snap.run.live;
   const progress = rows.total ? rows.done / rows.total : 0;
+  const throughput = stats.throughput_per_min;
+  const saved = fmtMoney(stats.cache_saved);
   return html`<div class="stats-strip">
     <${StatTile}
       label="Rows enriched"
@@ -178,11 +185,11 @@ function StatsStrip({ snap }) {
     <${StatTile}
       label="Spend"
       tip="Token spend so far, at list prices."
-      value=${fmtMoney(stats.spend)}
+      value=${fmtMoney(stats.spend) ?? DASH}
     />
     <${StatTile}
       label="Cache hits"
-      tip=${`${fmtPct(stats.cache_hit_rate)} of calls served from cache — ${fmtMoney(stats.cache_saved)} saved so far this run.`}
+      tip=${`${fmtPct(stats.cache_hit_rate)} of calls served from cache${saved ? ` — ${saved} saved so far this run` : ""}.`}
       value=${fmtPct(stats.cache_hit_rate)}
     />
     <${StatTile}
@@ -191,16 +198,22 @@ function StatsStrip({ snap }) {
       value=${fmtInt(stats.errors)}
       tone="red"
     />
-    <${StatTile}
+    ${/* A finished or abandoned run has no rate and nothing remaining —
+        the tiles would just show stale arithmetic. */ ""}
+    ${live &&
+    html`<${StatTile}
       label="Throughput"
       tip="Completed cells per minute over the recent window."
-      value=${html`${fmtInt(stats.throughput_per_min)}<span class="dim">/min</span>`}
-    />
-    <${StatTile}
+      value=${throughput == null
+        ? DASH
+        : html`${fmtInt(Math.round(throughput))}<span class="dim">/min</span>`}
+    />`}
+    ${live &&
+    html`<${StatTile}
       label="Time remaining"
       tip="Estimated from current throughput and the cells still pending."
-      value=${stats.eta_s != null ? fmtDuration(stats.eta_s) : "—"}
-    />
+      value=${stats.eta_s != null ? fmtDuration(stats.eta_s) : DASH}
+    />`}
   </div>`;
 }
 

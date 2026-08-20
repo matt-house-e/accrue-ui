@@ -3,7 +3,13 @@ import { useState } from "preact/hooks";
 import { html } from "../lib/html.js";
 import { IconBulb } from "../lib/icons.js";
 import { fmtClock, fmtInt, fmtMoney } from "../lib/fmt.js";
-import { postRetry, retryBusy, retryError, snapshot } from "../lib/store.js";
+import {
+  errorGroupsStale,
+  postRetry,
+  retryBusy,
+  retryError,
+  snapshot,
+} from "../lib/store.js";
 
 function rangeLabel(rows) {
   if (!rows || !rows.length) return "";
@@ -102,9 +108,12 @@ export function Triage() {
   const [expanded, setExpanded] = useState(0);
   const groups = snap.error_groups || [];
   const retry = snap.retry || { available: false, reason: null };
+  // New failures arrived by SSE (which carries counters, not groups) and the
+  // snapshot refetch that will bring their groups is still in flight.
+  const stale = errorGroupsStale.value;
 
   if (!groups.length) {
-    return html`<div class="triage">
+    return html`<div class="triage" aria-busy=${stale}>
       <div class="empty-state">No failures — nothing to triage.</div>
     </div>`;
   }
@@ -124,7 +133,7 @@ export function Triage() {
     }
   }
 
-  return html`<div class="triage">
+  return html`<div class="triage" aria-busy=${stale}>
     <div class="triage-summary">
       <span class="mono">${fmtInt(totalFailed)}</span> failed across${" "}
       <span class="mono">${groups.length}</span> causes ·${" "}

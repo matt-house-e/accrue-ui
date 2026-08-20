@@ -334,6 +334,58 @@ def test_devstub_is_not_inside_the_package():
     assert '"tools*"' in pyproject
 
 
+def test_values_fetching_pages_and_cannot_feed_itself():
+    """No JS runtime here — pin the loop-break at source level.
+
+    Two halves: the row-list memo must not depend on valuesVersion (loading
+    values would otherwise recompute it, re-firing the fetch effect), and
+    the fetch must ask only for uncached rows in server-sized pages.
+    """
+    grid = (STATIC / "views" / "grid.js").read_text()
+    memo_deps = grid.split("computeRows(arr, nsteps, filter, query)", 1)[1]
+    memo_deps = memo_deps.split("]", 1)[0]
+    assert "vversion" not in memo_deps
+    assert "VALUES_PAGE_MAX = 1000" in grid  # matches the server's clamp
+    assert "missingWindows" in grid
+    assert "!valuesCache.has(r)" in grid
+    # The fetch effect keys off the row SET, not every cell-state bump.
+    effect_deps = grid.split("}, 150);", 1)[1].split("[", 1)[1].split("]", 1)[0]
+    assert "version" not in effect_deps
+    assert "rows.length" in effect_deps
+
+
+def test_grid_clamps_the_first_visible_row():
+    """Switching to a sparser filter must not blank the grid for a frame."""
+    grid = (STATIC / "views" / "grid.js").read_text()
+    assert "Math.max(0, rows.length - 1)" in grid
+
+
+def test_search_placeholder_admits_the_cache_limit():
+    assert 'placeholder="Search loaded keys…"' in (STATIC / "app.js").read_text()
+
+
+def test_error_groups_refetch_when_a_delta_moves_the_error_count():
+    """Deltas carry counters, not groups: the triage list must catch up."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    assert "refreshErrorGroups" in store
+    assert "errorGroupsStale" in store
+    assert "errorsMoved" in store
+    triage = (STATIC / "views" / "triage.js").read_text()
+    assert "errorGroupsStale" in triage
+
+
+def test_stat_tiles_are_honest_when_the_run_is_not_live():
+    """No throughput or ETA tile for a run nothing is writing to."""
+    app_js = (STATIC / "app.js").read_text()
+    assert "const live = snap.run.live" in app_js
+    for label in ("Throughput", "Time remaining"):
+        guarded = "${live &&\n    html`<${StatTile}\n      label=" + f'"{label}"'
+        assert guarded in app_js, label
+    # Throughput renders as an integer, and as an em-dash when unknown.
+    assert "fmtInt(Math.round(throughput))" in app_js
+    assert "throughput == null" in app_js
+
+
 def test_retry_note_uses_existing_error_tokens():
     """Inline retry errors reuse the failed-red token; no new colors."""
     css = (STATIC / "style.css").read_text()

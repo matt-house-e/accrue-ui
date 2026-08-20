@@ -25,6 +25,11 @@ import {
 
 const PITCH = 38; // px per row: 32px row + 6px gap
 const OVERSCAN = 10;
+// /api/values clamps count to 1000 (docs/api-shapes.md). A filtered window
+// can span far more indices than that, so ask in pages instead of asking for
+// the whole span and getting a short answer back forever.
+const VALUES_PAGE_MAX = 1000;
+const VALUES_MAX_PAGES = 8;
 
 const LEGEND = [
   [0, "Pending"],
@@ -62,6 +67,28 @@ function computeRows(arr, nsteps, filter, query) {
     out.push(r);
   }
   return out;
+}
+
+// [start, count] windows covering only the rows in [first, last) that are
+// NOT already cached, each at most VALUES_PAGE_MAX indices wide. Rows the
+// cache already holds are never re-requested, so one pass fills the window
+// and the next render has nothing left to ask for.
+function missingWindows(rows, first, last) {
+  const need = [];
+  for (let i = first; i < last; i++) {
+    const r = rows[i];
+    if (r !== undefined && !valuesCache.has(r)) need.push(r);
+  }
+  const windows = [];
+  let i = 0;
+  while (i < need.length && windows.length < VALUES_MAX_PAGES) {
+    const lo = need[i];
+    let j = i;
+    while (j < need.length && need[j] - lo < VALUES_PAGE_MAX) j++;
+    windows.push([lo, need[j - 1] - lo + 1]);
+    i = j;
+  }
+  return windows;
 }
 
 function ColumnHead({ step, stepIndex, mode }) {
@@ -138,10 +165,16 @@ export function Grid() {
   const steps = snap.steps;
   const nsteps = steps.length;
 
+  // vversion is READ above (so loaded keys re-render) but deliberately NOT a
+  // dependency here: including it made loading values recompute the row
+  // list, which changed its identity, which re-fired the fetch effect below,
+  // which loaded values — a self-sustaining ~6Hz refetch loop.
   const rows = useMemo(
     () => computeRows(arr, nsteps, filter, query),
-    [arr, nsteps, filter, query, version, vversion]
+    [arr, nsteps, filter, query, version]
   );
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
   const total = arr ? Math.floor(arr.length / nsteps) : 0;
 
   // ---- virtualization ----
@@ -165,30 +198,31 @@ export function Grid() {
     };
   }, []);
 
-  const first = Math.max(0, Math.floor(viewport.top / PITCH) - OVERSCAN);
+  // Clamped to the last row: switching to a filter with fewer matches would
+  // otherwise leave `first` past the end for one frame and render nothing.
+  const first = Math.min(
+    Math.max(0, Math.floor(viewport.top / PITCH) - OVERSCAN),
+    Math.max(0, rows.length - 1)
+  );
   const last = Math.min(
     rows.length,
     Math.ceil((viewport.top + viewport.height) / PITCH) + OVERSCAN
   );
 
   // Fetch row values for the visible window (debounced, cache-aware).
+  // The deps are what changes the *row set*, not what changes cell states:
+  // a live run bumps cellsVersion ~10x/second, and re-running this on every
+  // bump would clear and re-arm the debounce forever (values never load) as
+  // well as re-requesting windows already in flight.
   useEffect(() => {
     if (last <= first) return;
     const timer = setTimeout(() => {
-      let need = false;
-      for (let i = first; i < last; i++) {
-        if (!valuesCache.has(rows[i])) {
-          need = true;
-          break;
-        }
+      for (const [start, count] of missingWindows(rowsRef.current, first, last)) {
+        loadValues(start, count);
       }
-      if (!need) return;
-      const lo = rows[first];
-      const hi = rows[last - 1];
-      loadValues(lo, hi - lo + 1);
     }, 150);
     return () => clearTimeout(timer);
-  }, [first, last, rows]);
+  }, [first, last, filter, query, rows.length]);
 
   const labelCol = mode === "data" ? "150px" : "200px";
   const stepCol = mode === "data" ? "minmax(180px, 1fr)" : "minmax(96px, 1fr)";
