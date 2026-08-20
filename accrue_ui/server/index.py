@@ -134,10 +134,15 @@ class RunIndex:
         self._step_idx: dict[str, int] = {}
         self._nrows = 0
         self._cells = bytearray()
-        self._row_keys: dict[int, str] = {}
+        self._row_keys: dict[int, str] = {}  # values-derived heuristic labels
+        self._row_keys_explicit: dict[int, str] = {}  # from row_complete "key"
         self._error_groups: dict[tuple[str, str], ErrorGroup] = {}
         self._completion_ts: list[float] = []  # non-decreasing (log guarantee)
         self._old_nsteps = 0  # column count the cells array was laid out with
+        # --- SSE delta tracking (drained by the coalescer, see drain_delta) --
+        self._dirty_cells: dict[tuple[int, int], int] = {}  # (row, step) -> state
+        self._dirty_steps: set[str] = set()
+        self._sent_stats: dict[str, Any] = {}  # stats as of the last drain
 
     # ------------------------------------------------------------------ dims
 
@@ -270,6 +275,8 @@ class RunIndex:
         pos = row * len(self._steps)
         prev = self._cells[pos + idx]
         self._cells[pos + idx] = state
+        self._dirty_cells[(row, idx)] = state  # latest state wins (coalescing)
+        self._dirty_steps.add(name)
         if prev in TERMINAL:  # duplicate delivery: don't double-count
             step.done -= 1
             if prev == ERROR:
@@ -305,6 +312,13 @@ class RunIndex:
         cell.values = values
         cell.preview = self._render_preview(state, values, error)
         cell.events.append((record.offset, record.length))
+
+        # Row label: an explicit "key" field (additive in core, string|null)
+        # wins over the values-derived heuristic; logs without it still label
+        # rows via display_key found in step outputs.
+        explicit_key = data.get("key")
+        if isinstance(explicit_key, str):
+            self._row_keys_explicit[row] = explicit_key
 
         if values:
             for key in values:
@@ -439,11 +453,31 @@ class RunIndex:
             return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
         return self.last_t
 
-    def snapshot(self) -> dict[str, Any]:
-        nsteps = len(self._steps)
+    def _stats_block(self, cost: dict[str, Any]) -> dict[str, Any]:
+        """The ``/api/run`` "stats" object; *cost* comes from _cost_block()."""
         total_done = sum(s.done for s in self._steps)
         total_errors = sum(s.errors for s in self._steps)
         total_cached = sum(s.cached_count for s in self._steps)
+        throughput = self._throughput_per_min()
+        total_cells = self._nrows * len(self._steps)
+        remaining = max(0, total_cells - total_done)
+        if self.finished:
+            eta_s: float | None = 0.0
+        elif throughput > 0:
+            eta_s = remaining / (throughput / 60.0)
+        else:
+            eta_s = None
+        return {
+            "spend": cost["_spend"],
+            "cache_hit_rate": (total_cached / total_done) if total_done else 0.0,
+            "errors": total_errors,
+            "throughput_per_min": throughput,
+            "eta_s": eta_s,
+            "cache_saved": cost["_cache_saved"],
+        }
+
+    def snapshot(self) -> dict[str, Any]:
+        nsteps = len(self._steps)
 
         rows_done = 0
         cells = self._cells
@@ -452,19 +486,9 @@ class RunIndex:
             if all(cells[base + j] in TERMINAL for j in range(nsteps)):
                 rows_done += 1
 
-        throughput = self._throughput_per_min()
-        total_cells = self._nrows * nsteps
-        remaining = max(0, total_cells - total_done)
-        if self.finished:
-            eta_s: float | None = 0.0
-        elif throughput > 0:
-            eta_s = remaining / (throughput / 60.0)
-        else:
-            eta_s = None
-
         cost = self._cost_block()
-        spend = cost.pop("_spend")
-        cache_saved = cost.pop("_cache_saved")
+        stats = self._stats_block(cost)
+        del cost["_spend"], cost["_cache_saved"]
 
         return {
             "run": self.run_meta(),
@@ -482,14 +506,7 @@ class RunIndex:
                 for s in self._steps
             ],
             "rows": {"total": self._nrows, "done": rows_done},
-            "stats": {
-                "spend": spend,
-                "cache_hit_rate": (total_cached / total_done) if total_done else 0.0,
-                "errors": total_errors,
-                "throughput_per_min": throughput,
-                "eta_s": eta_s,
-                "cache_saved": cache_saved,
-            },
+            "stats": stats,
             "cells": {
                 "encoding": "b64",
                 "rows": self._nrows,
@@ -506,6 +523,45 @@ class RunIndex:
             "available": False,
             "reason": "launched without --pipeline",
             "resume_command": f"accrue-ui {self.path} --pipeline <module:attr>",
+        }
+
+    # ---------------------------------------------------------------- deltas
+
+    def drain_delta(self) -> dict[str, Any] | None:
+        """Collect all changes since the last drain into one SSE delta payload.
+
+        Coalescing happens here: a cell touched several times between drains
+        yields ONE triple carrying its latest state, ``steps`` report current
+        counters, and ``stats`` holds only the keys whose value changed since
+        the last drain. The payload is state, not a journal — draining resets
+        the accumulators, so memory stays bounded by the grid size no matter
+        how fast the log grows. Returns None when nothing changed.
+        Shape: docs/api-shapes.md, ``GET /api/events``.
+        """
+        cells = [
+            [row, step_i, state] for (row, step_i), state in self._dirty_cells.items()
+        ]
+        steps = [
+            {"name": s.name, "done": s.done, "errors": s.errors}
+            for s in self._steps
+            if s.name in self._dirty_steps
+        ]
+        stats = self._stats_block(self._cost_block())
+        changed_stats = {
+            k: v
+            for k, v in stats.items()
+            if k not in self._sent_stats or self._sent_stats[k] != v
+        }
+        if not cells and not steps and not changed_stats:
+            return None
+        self._dirty_cells.clear()
+        self._dirty_steps.clear()
+        self._sent_stats = stats
+        return {
+            "t": round(self._elapsed_s(), 3),
+            "cells": cells,
+            "stats": changed_stats,
+            "steps": steps,
         }
 
     def _throughput_per_min(self) -> float:
@@ -585,6 +641,10 @@ class RunIndex:
     # ---------------------------------------------------------------- values
 
     def row_key(self, row: int) -> str:
+        """Display label: explicit ``row_complete.key`` wins over heuristic."""
+        explicit = self._row_keys_explicit.get(row)
+        if explicit is not None:
+            return explicit
         return self._row_keys.get(row, f"row {row}")
 
     def values_window(self, start: int, count: int) -> dict[str, Any]:

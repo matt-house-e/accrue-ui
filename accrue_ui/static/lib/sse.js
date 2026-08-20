@@ -1,7 +1,7 @@
 // SSE client: subscribes to /api/events and merges `delta` events into the
-// store. Live wiring on the server side is issue #3 — until then this is a
-// graceful no-op when the endpoint is missing (it stops retrying after a few
-// consecutive failures).
+// store (shape: docs/api-shapes.md). Degrades gracefully when the endpoint
+// is unreachable (dev stub gone, server stopped): it stops retrying after a
+// few consecutive failures and the footer shows "SSE idle".
 import { applyDelta, sseStatus } from "./store.js";
 
 let source = null;

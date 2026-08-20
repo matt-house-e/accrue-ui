@@ -2,7 +2,8 @@
 
 Exercises everything the golden fixture cannot: known/unknown model pricing,
 cache hits, an error burst (hint), ``__``-internal fields, preview
-truncation, batch-mode step_end usage, the SSE stub, retry, and live tailing.
+truncation, batch-mode step_end usage, the SSE stream, explicit row keys,
+retry, and live tailing.
 """
 
 from __future__ import annotations
@@ -305,56 +306,23 @@ def test_cell_detail_cached_batch_and_error(feature_log: Path):
     assert errored["raw_events"][0]["row"] == 5
 
 
-async def test_events_sse_stub(feature_log: Path):
-    """The stub is an infinite stream, so drive the ASGI app directly and
-    cancel after the first chunk — that is exactly what a client disconnect
-    looks like; TestClient cannot close a never-ending response."""
-    import asyncio
-    import contextlib
-
+async def test_events_sse_headers_and_open_comment(feature_log: Path):
+    """/api/events is an infinite stream: drive the ASGI app directly and
+    cancel to disconnect — TestClient cannot close a never-ending response.
+    Live delta payloads are covered in tests/test_events.py."""
     from accrue_ui.server.app import create_app
-    from tests.conftest import TOKEN
+    from tests.conftest import TOKEN, SSEStream, lifespan_ctx
 
     app = create_app(feature_log, token=TOKEN)
-    started: dict = {}
-    chunks: list[bytes] = []
-    got_first = asyncio.Event()
-
-    async def receive() -> dict:
-        await asyncio.sleep(3600)  # hold the connection open
-        return {"type": "http.disconnect"}
-
-    async def send(message: dict) -> None:
-        if message["type"] == "http.response.start":
-            started.update(message)
-        elif message["type"] == "http.response.body" and message.get("body"):
-            chunks.append(message["body"])
-            got_first.set()
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "GET",
-        "path": "/api/events",
-        "raw_path": b"/api/events",
-        "query_string": b"",
-        "root_path": "",
-        "scheme": "http",
-        "headers": [(b"host", b"localhost"), (b"x-accrue-token", TOKEN.encode())],
-        "server": ("localhost", 80),
-        "client": ("127.0.0.1", 1234),
-    }
-    task = asyncio.create_task(app(scope, receive, send))
-    await asyncio.wait_for(got_first.wait(), timeout=5)
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-    assert started["status"] == 200
-    headers = {k.decode(): v.decode() for k, v in started["headers"]}
-    assert headers["content-type"].startswith("text/event-stream")
-    assert chunks[0] == b": keepalive\n\n"
+    async with lifespan_ctx(app):
+        stream = SSEStream(app, token=TOKEN)
+        try:
+            await stream.wait_for(lambda s: s.chunks)
+            assert stream.status == 200
+            assert stream.headers["content-type"].startswith("text/event-stream")
+            assert stream.chunks[0] == b": connected\n\n"
+        finally:
+            await stream.close()
 
 
 def test_static_mounted_after_api(feature_log: Path):
@@ -372,6 +340,58 @@ def test_retry_stub_returns_409(feature_log: Path):
     body = resp.json()
     assert body["available"] is False
     assert body["reason"]
+
+
+def _keyed_records() -> list[dict]:
+    """Two steps, display_key "domain"; rows exercise every key-source combo."""
+    records = [
+        {
+            "v": 1,
+            "t": 0.0,
+            "type": "pipeline_start",
+            "run_id": "keyed-run",
+            "started_at": "2026-08-20T10:00:00+00:00",
+            "num_rows": 4,
+            "display_key": "domain",
+            "steps": [
+                {"name": "fetch", "level": 0, "mode": "realtime", "model": None},
+                {"name": "enrich", "level": 1, "mode": "realtime", "model": None},
+            ],
+            "plan": None,
+        },
+    ]
+    # Row 0: explicit key AND a display_key value -> explicit wins.
+    r0 = row("fetch", 0, 1.0, values={"domain": "site0.com"})
+    r0["key"] = "explicit.com"
+    # Row 1: no key field at all (old log) -> values-derived heuristic.
+    r1 = row("fetch", 1, 1.1, values={"domain": "site1.com"})
+    # Row 2: key present but null -> heuristic fallback.
+    r2 = row("fetch", 2, 1.2, values={"domain": "site2.com"})
+    r2["key"] = None
+    # Row 3: explicit key with no values to derive from.
+    r3 = row("fetch", 3, 1.3, status="skipped")
+    r3["key"] = "only-key.com"
+    records += [r0, r1, r2, r3]
+    # A later step's heuristic hit must NOT overwrite row 0's explicit key.
+    records.append(row("enrich", 0, 2.0, values={"domain": "other.com"}))
+    return records
+
+
+def test_row_complete_key_wins_over_heuristic(tmp_path: Path):
+    log = tmp_path / "keyed.jsonl"
+    write_log(log, _keyed_records())
+    age_file(log)
+    with client_for(log) as client:
+        values = client.get("/api/values?start=0&count=4").json()
+        detail = client.get("/api/cell/fetch/0").json()
+    keys = {r["row"]: r["key"] for r in values["rows"]}
+    assert keys == {
+        0: "explicit.com",  # explicit beats the display_key heuristic
+        1: "site1.com",  # no key field: heuristic still works
+        2: "site2.com",  # null key: tolerated, heuristic fallback
+        3: "only-key.com",  # explicit key needs no values
+    }
+    assert detail["key"] == "explicit.com"
 
 
 def test_app_follows_appended_records(tmp_path: Path):

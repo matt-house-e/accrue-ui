@@ -25,7 +25,7 @@ Backend lives in `accrue_ui/server/`:
 - **`routes.py`** —
   - `GET /api/run` — snapshot, including the full cell-state array
   - `GET /api/cell/{step}/{row}` — one cell's detail (prompt, response, error, cost)
-  - `GET /api/values?rows=a-b` — windowed row values
+  - `GET /api/values?start=A&count=N` — windowed row values
   - `GET /api/events` — SSE stream of coalesced deltas, ≤10Hz
   - `POST /api/retry` — retry failed rows (requires `--pipeline`)
   - `GET /api/runs` — list known run logs
@@ -34,6 +34,8 @@ Backend lives in `accrue_ui/server/`:
 - **`index.py`** — in-memory run index built from the log → snapshot + deltas.
   Cell state fits one byte: `0` pending, `1` running, `2` ok, `3` cached,
   `4` retrying, `5` error, `6` skipped.
+- **`events.py`** — SSE delta fan-out. Drop-and-coalesce: each client holds
+  one mergeable pending payload (state, not a journal), flushed ≤10Hz.
 - **`retry.py`** — retry orchestration.
 - **`security.py`** — bind `127.0.0.1` only, launch token, Origin/Host
   checks, mutations POST-only.
