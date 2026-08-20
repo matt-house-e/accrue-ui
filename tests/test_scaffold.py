@@ -10,9 +10,11 @@ def test_version():
     assert accrue_ui.__version__ == "0.1.0.dev0"
 
 
-def test_cli_main_exits_zero():
+def test_cli_version_exits_zero():
+    """--version is the zero-dependency smoke path now that the bare command
+    serves (and exits 1 when it finds no run log — see tests/test_cli.py)."""
     result = subprocess.run(
-        [sys.executable, "-m", "accrue_ui"],
+        [sys.executable, "-m", "accrue_ui", "--version"],
         capture_output=True,
         text=True,
         check=False,

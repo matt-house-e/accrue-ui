@@ -175,7 +175,10 @@ export function cycleField(step) {
 }
 
 // Merge one SSE delta (see docs/api-shapes.md, GET /api/events).
+let gapRefetching = false;
+
 export function applyDelta(delta) {
+  let gap = false;
   batch(() => {
     const snap = snapshot.value;
     const arr = cellStates.value;
@@ -184,7 +187,9 @@ export function applyDelta(delta) {
       for (const triple of delta.cells) {
         const [row, stepIndex, state] = triple;
         const i = row * nsteps + stepIndex;
-        if (i >= 0 && i < arr.length && state >= 0 && state <= 6) arr[i] = state;
+        const inGrid = row >= 0 && stepIndex >= 0 && stepIndex < nsteps && i < arr.length;
+        if (inGrid && state >= 0 && state <= 6) arr[i] = state;
+        else if (!inGrid) gap = true;
       }
       cellsVersion.value++;
     }
@@ -204,4 +209,15 @@ export function applyDelta(delta) {
       elapsedS.value = Math.floor(delta.t);
     }
   });
+  if (gap && !gapRefetching) {
+    // The delta references cells outside our known grid: the snapshot is
+    // stale (connect race, or the log was rebuilt) — refetch it. Deltas are
+    // idempotent state, so re-applying after the refetch is safe.
+    gapRefetching = true;
+    loadRun()
+      .catch(() => {})
+      .finally(() => {
+        gapRefetching = false;
+      });
+  }
 }

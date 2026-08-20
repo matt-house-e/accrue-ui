@@ -176,7 +176,8 @@ One cell's full detail for the inspector.
 ## `GET /api/events` (SSE)
 
 `text/event-stream` of coalesced deltas, event name `delta`, at most 10
-events/second. Each `data:` payload:
+events/second (the server accumulates changes and a coalescer flushes them
+at most every 100ms, however fast the log grows). Each `data:` payload:
 
 ```jsonc
 {
@@ -191,11 +192,23 @@ events/second. Each `data:` payload:
 }
 ```
 
-Clients merge deltas into the `/api/run` snapshot; a client that misses
-events re-fetches `/api/run`. Keepalive comment lines (`: ...`) may appear
-at any time. `tests/fixtures/api/events_sample.ndjson` holds sample payloads,
-one JSON payload per line (the dev stub replays them as `delta` events).
-Live wiring is issue #3.
+Deltas are **state, not a journal**: a cell that changed several times
+between flushes appears once with its latest state, and `stats`/`steps`
+carry current values. A slow consumer is never queued unboundedly — its
+unread payload is merged with the next flush (drop-and-coalesce), so
+per-client memory is bounded by the grid size.
+
+Clients merge deltas into the `/api/run` snapshot. **Connect race:** a delta
+published between a client's `/api/run` fetch and its EventSource attaching
+is not replayed — the stream continues from live state. A client that
+detects a gap (a delta referencing rows or steps outside its known grid)
+should re-fetch `/api/run`; payloads are idempotent state, so re-applying
+deltas after the refetch is safe.
+
+Keepalive comment lines (`: ...`) may appear at any time; the stream opens
+with a `: connected` comment. `tests/fixtures/api/events_sample.ndjson`
+holds sample payloads, one JSON payload per line (the dev stub replays them
+as `delta` events).
 
 ## `GET /api/runs`
 
