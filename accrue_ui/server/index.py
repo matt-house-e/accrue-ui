@@ -12,7 +12,14 @@ Cell state fits one byte: 0 pending, 1 running, 2 ok, 3 cached, 4 retrying,
 cannot be inferred cheaply from step_start..row_complete bracketing — a step
 in progress with rows not yet completed leaves those cells pending (0), and
 state 1 is reserved for a future emitter. "retrying" (4) is likewise
-reserved: v1 emits exactly one terminal row_complete per cell.
+reserved: v1 emits exactly one terminal row_complete per cell *per segment*.
+
+A ``retry_failed()`` segment appends a second ``row_complete`` for cells it
+re-executes (framed by ``retry_start`` / ``retry_end``, which this index
+ignores like any unknown record type). Re-delivery is therefore normal, not
+a fault: the new record replaces the cell's state, and the error groups heal
+with it — a cell that flips error -> ok leaves its group, and the group
+disappears once its last row does.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from .pricing import price_usd
+from .retry import RetryController
 from .tail import TailRecord
 
 PENDING, RUNNING, OK, CACHED, RETRYING, ERROR, SKIPPED = range(7)
@@ -106,21 +114,33 @@ class StepState:
 
 @dataclass
 class ErrorGroup:
+    """Failures of one (step, error type), keyed by row so retries can heal.
+
+    ``rows`` maps row index -> log-time of that row's failure, which makes
+    membership the single source of truth: ``count`` is ``len(rows)``, the
+    histogram is built from the timestamps still in it, and a healed row is
+    removed by deleting one key. Re-delivery of the same failure (a retry
+    that fails again) overwrites its entry instead of double-counting.
+    """
+
     step: str
     type: str
     message: str
-    count: int = 0
-    rows: set[int] = field(default_factory=set)
-    first_t: float = 0.0
-    last_t: float = 0.0
-    ts: list[float] = field(default_factory=list)
+    rows: dict[int, float] = field(default_factory=dict)
+
+    @property
+    def count(self) -> int:
+        return len(self.rows)
 
 
 class RunIndex:
     """Snapshot state for one run log; feed it records via :meth:`apply`."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, retry: RetryController | None = None):
         self.path = Path(path)
+        #: Retry orchestration for this run (``POST /api/retry``); a bare
+        #: controller with no ``--pipeline`` simply reports unavailable.
+        self.retry = retry if retry is not None else RetryController(path)
         self.run_id: str | None = None
         self.started_at: datetime | None = None
         self.display_key: str | None = None
@@ -134,6 +154,10 @@ class RunIndex:
         self._step_idx: dict[str, int] = {}
         self._nrows = 0
         self._cells = bytearray()
+        # Terminal cells per row + the count of fully-done rows, maintained
+        # incrementally so rows.done / rows_done never rescan the grid.
+        self._row_terminal: list[int] = []
+        self._rows_done = 0
         self._row_keys: dict[int, str] = {}  # values-derived heuristic labels
         self._row_keys_explicit: dict[int, str] = {}  # from row_complete "key"
         self._error_groups: dict[tuple[str, str], ErrorGroup] = {}
@@ -166,6 +190,24 @@ class RunIndex:
         self._cells = new
         self._nrows = nrows
         self._old_nsteps = nsteps
+        if old_nsteps == nsteps:
+            # Rows only grew: the new ones start with nothing terminal.
+            self._row_terminal.extend([0] * (nrows - len(self._row_terminal)))
+        else:
+            self._recount_rows_done()
+
+    def _recount_rows_done(self) -> None:
+        """Rebuild the per-row terminal counts (a column count changed)."""
+        nsteps = self._old_nsteps
+        cells = self._cells
+        self._row_terminal = [0] * self._nrows
+        self._rows_done = 0
+        for r in range(self._nrows):
+            base = r * nsteps
+            done = sum(1 for j in range(nsteps) if cells[base + j] in TERMINAL)
+            self._row_terminal[r] = done
+            if done == nsteps:
+                self._rows_done += 1
 
     def _ensure_dims(self, nrows: int | None = None, row: int | None = None) -> None:
         want_rows = self._nrows
@@ -248,7 +290,9 @@ class RunIndex:
         step.mode = self._map_mode(data.get("mode"))
         num_rows = data.get("num_rows")
         if isinstance(num_rows, int):
-            step.total = num_rows
+            # A retry segment re-opens the step with only the retried rows;
+            # the grid still has the whole run in it, so totals never shrink.
+            step.total = max(step.total, num_rows)
             self._ensure_dims(nrows=num_rows)
 
     def _apply_row_complete(self, record: TailRecord) -> None:
@@ -272,15 +316,26 @@ class RunIndex:
         else:
             state = OK
 
-        pos = row * len(self._steps)
+        cell = step.cells.get(row)
+        nsteps = len(self._steps)
+        pos = row * nsteps
         prev = self._cells[pos + idx]
         self._cells[pos + idx] = state
         self._dirty_cells[(row, idx)] = state  # latest state wins (coalescing)
         self._dirty_steps.add(name)
-        if prev in TERMINAL:  # duplicate delivery: don't double-count
+        if prev in TERMINAL:
+            # Re-delivery (a retry segment, or a duplicate): unwind the old
+            # terminal state before applying the new one.
             step.done -= 1
             if prev == ERROR:
                 step.errors -= 1
+                self._forget_error(name, row, cell)
+            elif prev == CACHED:
+                step.cached_count -= 1
+        else:
+            self._row_terminal[row] += 1
+            if self._row_terminal[row] == nsteps:
+                self._rows_done += 1
         step.done += 1
         if state == ERROR:
             step.errors += 1
@@ -300,7 +355,6 @@ class RunIndex:
         elapsed_ms = data.get("elapsed_ms")
         elapsed_ms = float(elapsed_ms) if isinstance(elapsed_ms, (int, float)) else None
 
-        cell = step.cells.get(row)
         if cell is None:
             cell = Cell()
             step.cells[row] = cell
@@ -353,18 +407,30 @@ class RunIndex:
 
         # --- error groups -------------------------------------------------
         if state == ERROR:
-            etype = str((error or {}).get("type") or "Error")
+            etype = _error_type(error)
             group = self._error_groups.get((name, etype))
             if group is None:
-                group = ErrorGroup(step=name, type=etype, message="", first_t=t)
+                group = ErrorGroup(step=name, type=etype, message="")
                 self._error_groups[(name, etype)] = group
             if not group.message:
                 group.message = str((error or {}).get("msg") or "")
-            group.count += 1
-            group.rows.add(row)
-            group.first_t = min(group.first_t, t)
-            group.last_t = max(group.last_t, t)
-            group.ts.append(t)
+            group.rows[row] = t
+
+    def _forget_error(self, step_name: str, row: int, cell: Cell | None) -> None:
+        """Drop *row* from the group its previous failure belonged to.
+
+        Called whenever a cell leaves the error state — healed by a retry, or
+        re-failed with a different error type (it then joins the new group).
+        The group itself disappears with its last row, so a fully healed run
+        reports no error groups at all.
+        """
+        key = (step_name, _error_type(cell.error if cell else None))
+        group = self._error_groups.get(key)
+        if group is None:
+            return
+        group.rows.pop(row, None)
+        if not group.rows:
+            del self._error_groups[(group.step, group.type)]
 
     def _apply_step_end(self, data: dict[str, Any]) -> None:
         name = data.get("step")
@@ -376,15 +442,18 @@ class RunIndex:
         if isinstance(usage, dict):
             tokens_in = usage.get("in") if isinstance(usage.get("in"), int) else 0
             tokens_out = usage.get("out") if isinstance(usage.get("out"), int) else 0
-            step.end_in = tokens_in
-            step.end_out = tokens_out
+            # Accumulate: a step_end arrives once per segment, so a retry adds
+            # what it spent rather than replacing the run's aggregate.
+            step.end_in += tokens_in
+            step.end_out += tokens_out
             usd = usage.get("cost")
             if not isinstance(usd, (int, float)):
                 usd = price_usd(step.model, tokens_in, tokens_out, batch=step.is_batch)
                 if usd is not None and step.is_batch and not step.row_usage_seen:
                     full = price_usd(step.model, tokens_in, tokens_out)
                     step.batch_saved += (full or 0.0) - usd
-            step.end_cost = float(usd) if usd is not None else None
+            if usd is not None:
+                step.end_cost = (step.end_cost or 0.0) + float(usd)
 
     def _apply_pipeline_end(self, data: dict[str, Any]) -> None:
         self.finished = True
@@ -478,14 +547,7 @@ class RunIndex:
 
     def snapshot(self) -> dict[str, Any]:
         nsteps = len(self._steps)
-
-        rows_done = 0
         cells = self._cells
-        for r in range(self._nrows):
-            base = r * nsteps
-            if all(cells[base + j] in TERMINAL for j in range(nsteps)):
-                rows_done += 1
-
         cost = self._cost_block()
         stats = self._stats_block(cost)
         del cost["_spend"], cost["_cache_saved"]
@@ -505,7 +567,7 @@ class RunIndex:
                 }
                 for s in self._steps
             ],
-            "rows": {"total": self._nrows, "done": rows_done},
+            "rows": {"total": self._nrows, "done": self._rows_done},
             "stats": stats,
             "cells": {
                 "encoding": "b64",
@@ -519,11 +581,8 @@ class RunIndex:
         }
 
     def retry_block(self) -> dict[str, Any]:
-        return {
-            "available": False,
-            "reason": "launched without --pipeline",
-            "resume_command": f"accrue-ui {self.path} --pipeline <module:attr>",
-        }
+        """``/api/run``'s retry block — availability comes from the controller."""
+        return self.retry.block()
 
     # ---------------------------------------------------------------- deltas
 
@@ -533,9 +592,11 @@ class RunIndex:
         Coalescing happens here: a cell touched several times between drains
         yields ONE triple carrying its latest state, ``steps`` report current
         counters, and ``stats`` holds only the keys whose value changed since
-        the last drain. The payload is state, not a journal — draining resets
-        the accumulators, so memory stays bounded by the grid size no matter
-        how fast the log grows. Returns None when nothing changed.
+        the last drain (plus ``rows_done``, the delta-only mirror of the
+        snapshot's ``rows.done``, so the progress bar tracks a live run
+        without refetching). The payload is state, not a journal — draining
+        resets the accumulators, so memory stays bounded by the grid size no
+        matter how fast the log grows. Returns None when nothing changed.
         Shape: docs/api-shapes.md, ``GET /api/events``.
         """
         cells = [
@@ -546,7 +607,7 @@ class RunIndex:
             for s in self._steps
             if s.name in self._dirty_steps
         ]
-        stats = self._stats_block(self._cost_block())
+        stats = {**self._stats_block(self._cost_block()), "rows_done": self._rows_done}
         changed_stats = {
             k: v
             for k, v in stats.items()
@@ -579,6 +640,8 @@ class RunIndex:
         groups = sorted(self._error_groups.values(), key=lambda g: -g.count)
         out = []
         for g in groups:
+            ts = list(g.rows.values())
+            first_t, last_t = min(ts), max(ts)
             out.append(
                 {
                     "step": g.step,
@@ -586,13 +649,27 @@ class RunIndex:
                     "count": g.count,
                     "message": g.message,
                     "rows": _compress_ranges(sorted(g.rows)),
-                    "first_t": self._iso(g.first_t),
-                    "last_t": self._iso(g.last_t),
-                    "histogram": _histogram(g.ts, g.first_t, g.last_t),
-                    "hint": _burst_hint(g.count, g.first_t, g.last_t),
+                    "first_t": self._iso(first_t),
+                    "last_t": self._iso(last_t),
+                    "histogram": _histogram(ts, first_t, last_t),
+                    "hint": _burst_hint(g.count, first_t, last_t),
                 }
             )
         return out
+
+    # ------------------------------------------------------------ retry rows
+
+    def error_rows(self) -> list[int]:
+        """Every row currently in an error state, deduped and sorted."""
+        rows: set[int] = set()
+        for group in self._error_groups.values():
+            rows.update(group.rows)
+        return sorted(rows)
+
+    def group_rows(self, step: str, error_type: str) -> list[int] | None:
+        """Rows of one error group, or None when no such group exists."""
+        group = self._error_groups.get((step, error_type))
+        return sorted(group.rows) if group is not None else None
 
     def _cost_block(self) -> dict[str, Any]:
         by_step: dict[str, float] = {}
@@ -734,6 +811,11 @@ class RunIndex:
 
 
 # ------------------------------------------------------------------- helpers
+
+
+def _error_type(error: dict[str, Any] | None) -> str:
+    """Group key for a failure; the v1 log's error object may be null."""
+    return str((error or {}).get("type") or "Error")
 
 
 def _one_line(text: str) -> str:

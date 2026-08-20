@@ -92,6 +92,41 @@ def test_post_with_loopback_origin_reaches_route(golden_log: Path):
         assert resp.status_code == 409  # the route's own answer, not a 4xx guard
 
 
+# ---- the retry mutation carries the same guards ---------------------------
+
+
+def test_retry_without_token_401(golden_log: Path):
+    with client_for(golden_log, authed=False) as client:
+        resp = client.post(
+            "/api/retry",
+            json={"all": True},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 401
+
+
+def test_retry_with_evil_origin_403(golden_log: Path):
+    with client_for(golden_log) as client:
+        resp = client.post(
+            "/api/retry",
+            json={"all": True},
+            headers={"Origin": "https://evil.example"},
+        )
+        assert resp.status_code == 403
+
+
+def test_retry_via_cookie_alone_reaches_the_route(golden_log: Path):
+    """The frontend POSTs same-origin with no token header: the cookie auths."""
+    with client_for(golden_log, authed=False) as client:
+        client.get(f"/?token={TOKEN}")
+        resp = client.post(
+            "/api/retry",
+            json={"all": True},
+            headers={"Origin": "http://localhost"},
+        )
+        assert resp.status_code == 409  # unavailable (no --pipeline), not 401
+
+
 def test_empty_token_rejected_at_construction(golden_log: Path):
     from accrue_ui.server.app import create_app
 

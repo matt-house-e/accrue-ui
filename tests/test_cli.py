@@ -181,11 +181,28 @@ def test_no_browser_suppresses_webbrowser(run_log: Path, captured: dict):
     assert captured["browser"] == []
 
 
-def test_pipeline_stored_for_issue_4(run_log: Path, captured: dict):
-    assert cli.main([str(run_log), "--no-browser", "--pipeline", "enrich:pipe"]) == 0
-    assert captured["app"].state.pipeline == "enrich:pipe"
+def test_pipeline_and_data_specs_reach_the_retry_controller(
+    run_log: Path, captured: dict
+):
+    """--pipeline/--data build the retry controller; bad specs stay non-fatal."""
+    argv = [str(run_log), "--no-browser", "--pipeline", "enrich:pipe"]
+    assert cli.main([*argv, "--data", "enrich:rows"]) == 0
+    controller = captured["app"].state.retry
+    assert (controller.pipeline_spec, controller.data_spec) == (
+        "enrich:pipe",
+        "enrich:rows",
+    )
+    # No such module: the server still came up, retry just says why not.
+    assert controller.available is False
+    assert "cannot import module 'enrich'" in controller.reason
+    assert controller.resume_command.endswith(
+        "--pipeline enrich:pipe --data enrich:rows"
+    )
+
     assert cli.main([str(run_log), "--no-browser"]) == 0
-    assert captured["app"].state.pipeline is None
+    controller = captured["app"].state.retry
+    assert (controller.pipeline_spec, controller.data_spec) == (None, None)
+    assert controller.reason == "launched without --pipeline"
 
 
 # ---- the CLI-built app keeps the security posture -------------------------

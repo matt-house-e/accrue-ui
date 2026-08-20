@@ -3,8 +3,10 @@
 Response shapes follow the frontend lane's ``docs/api-shapes.md`` (v0.1
 contract). ``GET /api/events`` streams live coalesced deltas (≤10Hz — the
 coalescer in ``app.py`` drains the RunIndex at most every 100ms) with
-keepalive comments between them. ``POST /api/retry`` always answers 409 for
-now; retry lands in issue #4.
+keepalive comments between them. ``POST /api/retry`` selects failed rows and
+hands them to the retry controller (``retry.py``), which re-runs exactly
+those cells and appends the result to the log this server is already
+following, so healed cells arrive by the same path as a live run.
 """
 
 from __future__ import annotations
@@ -12,12 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .events import DeltaBroadcaster
 from .index import RunIndex, scan_runs
+from .retry import ALREADY_RUNNING, RetryController
 
 SSE_KEEPALIVE_INTERVAL_S = 15.0
 VALUES_MAX_COUNT = 1000
@@ -97,14 +101,86 @@ async def get_events(request: Request) -> StreamingResponse:
     )
 
 
+def _selected_rows(body: Any, index: RunIndex) -> list[int]:
+    """Resolve a retry request body to row indices, or raise HTTPException.
+
+    Exactly one selector: ``{"rows": [...]}`` (explicit), ``{"group":
+    {"step": s, "type": t}}`` (one error group, resolved against the index's
+    current groups — so a group that healed since the page loaded is a 404,
+    not a silent no-op), or ``{"all": true}`` (every errored row).
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    selectors = [key for key in ("rows", "group", "all") if key in body]
+    if len(selectors) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail='exactly one of "rows", "group", "all" is required',
+        )
+    selector = selectors[0]
+
+    if selector == "all":
+        if body["all"] is not True:
+            raise HTTPException(status_code=400, detail='"all" must be true')
+        rows = index.error_rows()
+        if not rows:
+            raise HTTPException(status_code=400, detail="no failed rows to retry")
+        return rows
+
+    if selector == "rows":
+        rows = body["rows"]
+        valid = (
+            isinstance(rows, list)
+            and bool(rows)
+            and all(isinstance(r, int) and not isinstance(r, bool) for r in rows)
+        )
+        if not valid:
+            raise HTTPException(
+                status_code=400, detail='"rows" must be a non-empty list of integers'
+            )
+        return sorted(set(rows))
+
+    group = body["group"]
+    if not isinstance(group, dict) or not isinstance(group.get("step"), str):
+        raise HTTPException(
+            status_code=400, detail='"group" must be {"step": ..., "type": ...}'
+        )
+    rows = index.group_rows(group["step"], str(group.get("type") or "Error"))
+    if rows is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no error group {group['step']}/{group.get('type')}",
+        )
+    return rows
+
+
 @router.post("/retry")
 async def post_retry(request: Request) -> JSONResponse:
-    """Retry is not available in the read path; orchestration is issue #4."""
-    retry = _index(request).retry_block()
-    return JSONResponse(
-        {"available": False, "reason": retry["reason"]},
-        status_code=409,
-    )
+    """Re-run failed cells: 202 with the row count, or 409 with the reason.
+
+    409 covers both ways retry can be off the table — the server was
+    launched without a usable ``--pipeline``, or one retry is already in
+    flight (only ever one at a time). Accepted retries run in the
+    background; watch ``/api/run`` and the SSE stream for the cells healing.
+    """
+    index = _index(request)
+    controller: RetryController = request.app.state.retry
+    block = controller.block()
+    if not block["available"]:
+        return JSONResponse(block, status_code=409)
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="body must be JSON") from None
+    rows = _selected_rows(body, index)
+    steps = None
+    if isinstance(body, dict) and isinstance(body.get("group"), dict):
+        steps = [body["group"]["step"]]
+
+    if not controller.start(rows, steps=steps, display_key=index.display_key):
+        return JSONResponse({**block, "reason": ALREADY_RUNNING}, status_code=409)
+    return JSONResponse({"accepted": len(rows)}, status_code=202)
 
 
 @router.api_route(

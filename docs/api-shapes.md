@@ -97,10 +97,16 @@ Full snapshot of the run, including the complete cell-state array.
   "retry": {
     "available": false,            // POST /api/retry would work
     "reason": "launched without --pipeline",  // string | null (null when available)
-    "resume_command": "accrue watch --pipeline enrich:pipeline"
+    "resume_command": "accrue-ui .accrue/runs/2026-08-17a.jsonl --pipeline enrich:pipeline",
+    "running": false,              // a retry is in flight right now
+    "last_error": null             // string | null: why the last retry task died
   }
 }
 ```
+
+`resume_command` is the actual command line that reproduces this server with
+retry enabled — including `--data` when the launch used it. When the server
+was launched without `--pipeline` it carries the `<module:attr>` placeholder.
 
 Invariants the server must keep:
 
@@ -184,13 +190,19 @@ at most every 100ms, however fast the log grows). Each `data:` payload:
   "t": 402.6,                      // seconds since run start
   "cells": [[1283, 1, 2]],         // [row, stepIndex, newState] triples;
                                    // stepIndex = index into /api/run steps
-  "stats": { "spend": 4.84 },      // ONLY the stats keys that changed (subset
-                                   // of /api/run "stats"); may be {}
+  "stats": { "spend": 4.84, "rows_done": 3413 },  // ONLY the keys that changed
+                                   // (subset of /api/run "stats", plus
+                                   // "rows_done"); may be {}
   "steps": [                       // ONLY steps whose counters changed; may be []
     { "name": "web_search", "done": 4391, "errors": 38 }
   ]
 }
 ```
+
+`stats.rows_done` is the one delta-only key: it mirrors the snapshot's
+`rows.done` (rows complete through the last step), which lives outside
+`stats` in `/api/run` but rides along here so the progress tile tracks a
+live run — or a retry healing cells — without refetching the snapshot.
 
 Deltas are **state, not a journal**: a cell that changed several times
 between flushes appears once with its latest state, and `stats`/`steps`
@@ -209,6 +221,38 @@ Keepalive comment lines (`: ...`) may appear at any time; the stream opens
 with a `: connected` comment. `tests/fixtures/api/events_sample.ndjson`
 holds sample payloads, one JSON payload per line (the dev stub replays them
 as `delta` events).
+
+## `POST /api/retry`
+
+Re-runs failed cells with `Pipeline.retry_failed_async()` and appends the
+result to the log being served (accrue writes a `retry_start` … `retry_end`
+segment), so healed cells arrive through `/api/events` like any other
+records. Same-origin POST: the launch-token cookie authenticates it, no
+header needed. The body carries **exactly one** selector:
+
+```jsonc
+{ "rows": [1284, 1290] }                              // explicit row indices
+{ "group": { "step": "web_search", "type": "RateLimitError" } }  // one error group
+{ "all": true }                                       // every errored row
+```
+
+A `group` selector is resolved against the snapshot's `error_groups` and also
+restricts the retry to that step; `rows` and `all` retry every failed step of
+the rows named.
+
+| Status | Body | When |
+|--------|------|------|
+| 202 | `{"accepted": 12}` | Accepted; 12 rows are being retried in the background |
+| 400 | `{"detail": "..."}` | Malformed body, no selector (or more than one), or nothing failed |
+| 401 / 403 | `{"detail": "..."}` | Missing token / non-loopback Origin (see `security.py`) |
+| 404 | `{"detail": "no error group ..."}` | The named group is not in the index (it may have healed already) |
+| 405 | `{"detail": "Method Not Allowed"}` | Mutations are POST-only |
+| 409 | the `retry` block, `reason` saying why | Retry unavailable, or `"retry already running"` |
+
+Only one retry runs at a time. While it does, `/api/run`'s `retry.running` is
+`true`; when the task itself fails (bad checkpoint, pipeline raised), the
+reason lands in `retry.last_error` and stays there until the next retry
+starts.
 
 ## `GET /api/runs`
 
