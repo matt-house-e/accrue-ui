@@ -929,6 +929,7 @@ button:disabled { cursor: not-allowed; }
 }
 .bar-track { min-width: 0; }
 .bar-fill {
+  display: block; /* span is inline by default — width/height are ignored without this */
   height: 14px;
   background: var(--jade-9);
   border-radius: 0 4px 4px 0;
