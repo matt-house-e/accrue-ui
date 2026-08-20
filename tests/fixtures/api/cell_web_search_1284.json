@@ -1,0 +1,30 @@
+{
+  "step": "web_search",
+  "row": 1284,
+  "key": "vercel.com",
+  "status": "error",
+  "from_cache": false,
+  "error": {
+    "type": "RateLimitError",
+    "msg": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, Used 1,998,432, Requested 5,214. Please try again in 6ms."
+  },
+  "usage": { "in": 1204, "out": 0, "cost": 0.0031 },
+  "elapsed_ms": 26100,
+  "queued_at": "2026-08-17T09:41:00Z",
+  "attempts": [
+    { "n": 1, "kind": "live", "at": "2026-08-17T09:41:02Z", "latency_ms": 1900, "status": "error", "backoff_s": 2 },
+    { "n": 2, "kind": "retry", "at": "2026-08-17T09:41:06Z", "latency_ms": 4200, "status": "error", "backoff_s": 8 },
+    { "n": 3, "kind": "retry", "at": "2026-08-17T09:41:18Z", "latency_ms": 8100, "status": "error", "backoff_s": null }
+  ],
+  "values": null,
+  "raw_events": [
+    { "t": "2026-08-17T09:41:00.222Z", "ev": "cell_queued", "step": "web_search", "row": 1284, "key": "vercel.com" },
+    { "t": "2026-08-17T09:41:02.031Z", "ev": "attempt_start", "step": "web_search", "row": 1284, "attempt": 1, "kind": "live", "model": "gpt-5.2-mini" },
+    { "t": "2026-08-17T09:41:03.931Z", "ev": "attempt_error", "step": "web_search", "row": 1284, "attempt": 1, "latency_ms": 1900, "backoff_s": 2, "error": { "type": "RateLimitError", "msg": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, Used 1,998,432, Requested 5,214. Please try again in 6ms." } },
+    { "t": "2026-08-17T09:41:06.014Z", "ev": "attempt_start", "step": "web_search", "row": 1284, "attempt": 2, "kind": "retry", "model": "gpt-5.2-mini" },
+    { "t": "2026-08-17T09:41:10.218Z", "ev": "attempt_error", "step": "web_search", "row": 1284, "attempt": 2, "latency_ms": 4200, "backoff_s": 8, "error": { "type": "RateLimitError", "msg": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, Used 1,998,432, Requested 5,214. Please try again in 6ms." } },
+    { "t": "2026-08-17T09:41:18.220Z", "ev": "attempt_start", "step": "web_search", "row": 1284, "attempt": 3, "kind": "retry", "model": "gpt-5.2-mini" },
+    { "t": "2026-08-17T09:41:26.322Z", "ev": "attempt_error", "step": "web_search", "row": 1284, "attempt": 3, "latency_ms": 8100, "backoff_s": null, "error": { "type": "RateLimitError", "msg": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, Used 1,998,432, Requested 5,214. Please try again in 6ms." } },
+    { "t": "2026-08-17T09:41:26.322Z", "ev": "cell_failed", "step": "web_search", "row": 1284, "usage": { "in": 1204, "out": 0, "cost": 0.0031 }, "elapsed_ms": 26100 }
+  ]
+}

@@ -1,0 +1,8 @@
+{"t": 401.4, "cells": [[3412, 4, 1], [3413, 4, 1]], "stats": {}, "steps": []}
+{"t": 402.1, "cells": [[4426, 1, 2], [4427, 1, 2], [3908, 2, 2]], "stats": {"spend": 4.84}, "steps": [{"name": "web_search", "done": 4390, "errors": 38}, {"name": "summarize", "done": 3905, "errors": 4}]}
+{"t": 402.8, "cells": [[3412, 4, 2], [3519, 3, 1]], "stats": {"throughput_per_min": 249, "eta_s": 382}, "steps": [{"name": "email", "done": 3413, "errors": 0}]}
+{"t": 403.5, "cells": [[1283, 1, 2]], "stats": {}, "steps": [{"name": "web_search", "done": 4391, "errors": 38}]}
+{"t": 404.2, "cells": [[3413, 4, 2], [3414, 4, 1], [3909, 2, 3]], "stats": {"spend": 4.85, "cache_hit_rate": 0.72, "cache_saved": 1.95}, "steps": [{"name": "email", "done": 3414, "errors": 0}, {"name": "summarize", "done": 3906, "errors": 4}]}
+{"t": 404.9, "cells": [[3519, 3, 2], [3520, 3, 1]], "stats": {"eta_s": 380}, "steps": [{"name": "score", "done": 3512, "errors": 0}]}
+{"t": 405.6, "cells": [[4428, 1, 2], [4429, 1, 2], [4442, 1, 1], [4443, 1, 1]], "stats": {"spend": 4.86}, "steps": [{"name": "web_search", "done": 4393, "errors": 38}]}
+{"t": 406.3, "cells": [[3414, 4, 2], [3910, 2, 2]], "stats": {"throughput_per_min": 250, "eta_s": 378}, "steps": [{"name": "email", "done": 3415, "errors": 0}, {"name": "summarize", "done": 3907, "errors": 4}]}
