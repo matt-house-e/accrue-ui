@@ -27,6 +27,12 @@ const STATUS_BYTE = {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
+// Backoff is a raw float of seconds; sub-second sleeps read better as ms.
+const fmtBackoff = (s) =>
+  s >= 1 ? `${s.toFixed(1)}s` : `${Math.max(1, Math.round(s * 1000))}ms`;
+
+const asText = (v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
+
 function bannerText(d) {
   switch (d.status) {
     case "error": {
@@ -71,16 +77,55 @@ function kvRows(d) {
 
 function AttemptRow({ attempt, isLast, failed }) {
   const finalFail = isLast && failed;
+  const errMsg = attempt.error && attempt.error.msg;
   return html`<div class=${`attempt${finalFail ? " final-fail" : ""}`}>
-    <span class="kind-chip">${attempt.kind}</span>
-    <span class="n">#${attempt.n}</span>
-    <span>${fmtClock(attempt.at)}</span>
-    <span>${fmtLatency(attempt.latency_ms)}</span>
-    <span class=${`a-status ${attempt.status === "ok" ? "ok" : "err"}`}>
-      ${attempt.status}
-    </span>
-    ${attempt.backoff_s != null &&
-    html`<span class="backoff">backoff ${attempt.backoff_s}s</span>`}
+    <div class="attempt-line">
+      <span class="kind-chip">${attempt.kind}</span>
+      <span class="n">#${attempt.n}</span>
+      <span>${fmtClock(attempt.at)}</span>
+      <span>${fmtLatency(attempt.latency_ms)}</span>
+      <span class=${`a-status ${attempt.status === "ok" ? "ok" : "err"}`}>
+        ${attempt.status}
+      </span>
+      ${attempt.backoff_s != null &&
+      html`<span class="backoff">backoff ${fmtBackoff(attempt.backoff_s)}</span>`}
+    </div>
+    ${errMsg && html`<div class="attempt-err mono">${errMsg}</div>`}
+  </div>`;
+}
+
+// Prompt & response tab: the real captured body from the prompt sidecar, or a
+// capture-tier-aware empty state. `prompt` is {messages, response, parsed} when
+// the run captured bodies; null otherwise. `captureAvailable` distinguishes a
+// run with no capture at all (hint how to turn it on) from a cell that simply
+// had no body (e.g. a pure api error on a captured run).
+function PromptView({ prompt, captureAvailable }) {
+  if (!prompt) {
+    return html`<div class="empty-state">
+      ${captureAvailable
+        ? "No prompt captured for this cell."
+        : html`No prompt/response captured for this run. Re-run with
+            <code>capture="prompts"</code> to inspect the request and response
+            bodies here.`}
+    </div>`;
+  }
+  const messages = Array.isArray(prompt.messages) ? prompt.messages : [];
+  return html`<div class="prompt-view">
+    ${messages.map(
+      (m, i) => html`<div class="prompt-msg" key=${`m${i}`}>
+        <div class="prompt-role">${m.role}</div>
+        <pre class="prompt-content">${asText(m.content)}</pre>
+      </div>`
+    )}
+    <div class="prompt-msg response">
+      <div class="prompt-role">response</div>
+      <pre class="prompt-content">${asText(prompt.response)}</pre>
+    </div>
+    ${prompt.parsed != null &&
+    html`<div class="prompt-msg parsed">
+      <div class="prompt-role">parsed</div>
+      <pre class="prompt-content">${asText(prompt.parsed)}</pre>
+    </div>`}
   </div>`;
 }
 
@@ -182,9 +227,10 @@ export function Inspector() {
         )}
       </div>
       ${tab === "prompt" &&
-      html`<div class="empty-state">
-        Capture is off — prompt/response capture lands in v0.2
-      </div>`}
+      html`<${PromptView}
+        prompt=${d.prompt}
+        captureAvailable=${d.capture_available}
+      />`}
       ${tab === "values" && html`<${ValuesTable} values=${d.values} />`}
       ${tab === "raw" &&
       html`<pre class="raw-json">${JSON.stringify(d.raw_events, null, 2)}</pre>`}
