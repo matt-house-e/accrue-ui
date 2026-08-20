@@ -19,7 +19,9 @@ jobs:
       # PyPI release — the integration tests drive Pipeline.run(run_log=...)
       # and retry_failed_async, which 1.3.0 does not have.
       - name: Install accrue from main
-        run: pip install --upgrade "git+https://github.com/matt-house-e/accrue.git"
+        # --force-reinstall: main's version string still equals the PyPI
+        # release, so plain pip considers the requirement satisfied
+        run: pip install --force-reinstall --no-deps "git+https://github.com/matt-house-e/accrue.git"
       - name: Lint
         run: ruff check .
       - name: Test
