@@ -46,3 +46,19 @@ Overview view (accrue-ui #19) and the server-side `overview_block` parse.
 
 To refresh: re-copy the file(s) from accrue main and update the commit SHAs
 above. Do not hand-edit the JSONL.
+
+## `run_retries.jsonl`
+
+A **synthetic** manifest-bearing run with **injected retries** — the live and
+pinned runs error zero times, so nothing else exercises the Overview's per-step
+retry chip (#22), its dominant-bucket / breakdown-tooltip, or the
+cached-exclusion in the p50/p95 timing (#21). Two `LLMStep`s
+(`classify` -> `assess`), each carrying a row-independent `system_prompt` (accrue
+#140) and a `step_end.elapsed_s`; a handful of cells retry (`rate_limited` /
+`parse_error` / `timeout`, api and parse kinds) and two rows per step are served
+from cache. Deliberately **metadata tier** (no prompt sidecar): it proves the
+retry aggregation renders without captured bodies.
+
+Unlike the pinned fixtures above, this one is **generated, not copied** — it is
+not a cross-repo contract handshake, just local test data. Regenerate with
+`python tests/fixtures/contract/gen_run_retries.py` (deterministic).
