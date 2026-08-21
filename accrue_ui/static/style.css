@@ -1188,6 +1188,53 @@ button:disabled { cursor: not-allowed; }
   border: 1px dashed var(--border-2);
 }
 
+/* per-step timing (P21): wall-clock headline + p50/p95 secondary, by cost */
+.ov-time { font: 400 11px/1 var(--font-mono); color: var(--faint-2); white-space: nowrap; }
+.ov-time.running { color: var(--jade-11); }
+.ov-time .ov-lat { color: var(--faint-1); }
+
+/* per-step retry chip (P22): dominant failure bucket surfaced, full breakdown
+   on hover via the shared body-portaled tooltip (data-tip). */
+.ov-retry { color: var(--faint-2); cursor: help; white-space: nowrap; }
+.ov-retry .ov-retry-dom { color: var(--retry-text); }
+
+/* system-prompt panel (accrue #140): the row-independent cached prefix,
+   collapsed by default (native <details>), expandable, monospace. */
+.ov-prompt { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-1); }
+.ov-prompt-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.ov-prompt-head::-webkit-details-marker { display: none; }
+.ov-prompt-title { font: 600 12px/1 var(--font-sans); color: var(--ink); }
+.ov-prompt-tag { font: 400 10.5px/1 var(--font-mono); color: var(--faint-2); }
+.ov-prompt-chev {
+  margin-left: auto;
+  color: var(--faint-1);
+  font-size: 10px;
+  transition: transform 0.12s ease;
+}
+.ov-prompt[open] .ov-prompt-chev { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .ov-prompt-chev { transition: none; }
+}
+.ov-prompt-body {
+  margin: 9px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--ground);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  font: 400 11px/1.6 var(--font-mono);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* enrichment-field schema table */
 .ov-table { border: 1px solid var(--border-1); border-radius: 8px; overflow: hidden; }
 .ov-thead {
