@@ -253,9 +253,13 @@ over-wide window is a refetch loop, not a retry.
       "row": 1281,
       "key": "stripe.com",         // display key for the row
       "cells": {
-        "classify":   { "v": "fintech / payments", "s": 2 },
-        "web_search": { "v": "Series I · $6.5B raised", "s": 3 },
-        "summarize":  { "v": null, "s": 0 }
+        "classify":   {
+          "v": "fintech / payments",
+          "f": { "category": "fintech / payments", "hq_country": "US" },
+          "s": 2
+        },
+        "web_search": { "v": "Series I · $6.5B raised", "f": { "summary": "Series I · $6.5B raised" }, "s": 3 },
+        "summarize":  { "v": null, "f": null, "s": 0 }
       }
     }
   ]
@@ -265,11 +269,16 @@ over-wide window is a refetch loop, not a retry.
 - `v` — short string preview of the cell's value (server-rendered, one line,
   already truncated), or `null` when there is nothing to show (pending,
   running, most skips). For error/retrying cells `v` MAY carry a short error
-  preview (e.g. `"RateLimitError · 3 attempts"`).
+  preview (e.g. `"RateLimitError · 3 attempts"`). Kept for back-compat; it is
+  always `f`'s first entry when `f` is non-null.
+- `f` — field name -> rendered preview string, one entry per non-internal
+  field the step produced (same truncation rules as `v`), or `null` for
+  cells with nothing to render (pending/running/error/retrying/skipped, or a
+  step with no values yet). This is what lets the data grid's field-chip
+  actually switch the rendered value, not just the column label
+  (accrue-ui#23) — a client must read the chosen field out of `f`, not
+  assume `v` tracks the selection.
 - `s` — the cell-state byte, same encoding as `cells.data`.
-- Reserved for v0.2: `&field.<step>=<name>` selects which output field the
-  preview renders. v0.1 servers and the dev stub may ignore it (preview is
-  the step's first non-internal field).
 
 ## `GET /api/cell/{step}/{row}`
 

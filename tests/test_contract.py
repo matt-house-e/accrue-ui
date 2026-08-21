@@ -118,12 +118,17 @@ def test_values_previews(golden_log: Path):
     row0 = body["rows"][0]
     # display_key "company" never appears in step outputs -> fallback label.
     assert row0["key"] == "row 0"
-    assert row0["cells"]["normalize"] == {"v": "COMPANY-00", "s": OK}
+    assert row0["cells"]["normalize"] == {
+        "v": "COMPANY-00",
+        "f": {"name_upper": "COMPANY-00"},
+        "s": OK,
+    }
     row7 = body["rows"][ERROR_ROW]
     assert row7["cells"]["score"]["s"] == ERROR
     assert row7["cells"]["score"]["v"].startswith("ValueError")
+    assert row7["cells"]["score"]["f"] is None  # errored cell: nothing to choose
     row3 = body["rows"][SKIP_ROW]
-    assert row3["cells"]["flag"] == {"v": None, "s": SKIPPED}
+    assert row3["cells"]["flag"] == {"v": None, "f": None, "s": SKIPPED}
 
 
 def test_values_window_clamps(golden_log: Path):
