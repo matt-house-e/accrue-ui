@@ -126,11 +126,16 @@ function StatusCell({ stepName, stepIndex, row, state }) {
   </button>`;
 }
 
-function DataCell({ stepName, row, state, vrow }) {
+function DataCell({ step, stepName, row, state, vrow }) {
   const sel = selection.value;
   const isSel = sel && sel.step === stepName && sel.row === row;
   const cell = vrow && vrow.cells ? vrow.cells[stepName] : null;
-  const v = cell ? cell.v : null;
+  // Reading fieldChoice.value here subscribes this cell, so it re-renders
+  // when the column's field-chip cycles (accrue-ui#23) — cell.f carries all
+  // of the step's produced fields, keyed by name; cell.v (its first entry)
+  // is the fallback for cells with no field map (error/retrying/etc).
+  const field = fieldChoice.value[stepName] || stepFields(step)[0];
+  const v = cell && cell.f ? cell.f[field] : cell ? cell.v : null;
   let body;
   if (state === 5) {
     const group = errorGroupFor(stepName, row);
@@ -247,6 +252,7 @@ export function Grid() {
         return mode === "data"
           ? html`<${DataCell}
               key=${step.name}
+              step=${step}
               stepName=${step.name}
               row=${r}
               state=${state}

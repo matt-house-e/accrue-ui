@@ -183,5 +183,8 @@ def test_values_window_mid_range(scale_log: Path):
     assert [r["row"] for r in body["rows"]] == [10000, 10001, 10002]
     row0 = body["rows"][0]
     assert row0["key"] == "row 10000"  # display_key null -> fallback label
-    assert row0["cells"]["step0"] == {"v": "v10000", "s": 2}
-    assert row0["cells"]["step4"] == {"v": "v10000", "s": 2}
+    # Fixture's value field happens to be named "f" too — {"f": "v10000"} is
+    # the field-name -> value map, distinct from the top-level "f" key it
+    # sits under.
+    assert row0["cells"]["step0"] == {"v": "v10000", "f": {"f": "v10000"}, "s": 2}
+    assert row0["cells"]["step4"] == {"v": "v10000", "f": {"f": "v10000"}, "s": 2}

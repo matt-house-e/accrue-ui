@@ -80,6 +80,10 @@ class Cell:
     t: float | None = None  # log-time of the terminal record
     values: dict[str, Any] | None = None
     preview: str | None = None
+    #: field name -> rendered preview string, one entry per non-internal
+    #: field this cell's step produced (same truncation as ``preview``, which
+    #: is just this map's first entry). Populated for OK/CACHED cells only.
+    preview_fields: dict[str, str | None] | None = None
     #: One entry per row_complete seen for this cell: (offset, length,
     #: from_a_retry_segment). The bytes are re-read on demand; the flag is
     #: what makes the inspector's attempt list say "retry".
@@ -519,6 +523,7 @@ class RunIndex:
         cell.t = t
         cell.values = values
         cell.preview = self._render_preview(state, values, error)
+        cell.preview_fields = self._render_field_map(state, values)
         cell.events.append((record.offset, record.length, self._in_retry))
         if len(cell.events) > MAX_CELL_EVENTS:
             # A pathological log (or a cell retried hundreds of times) must
@@ -631,12 +636,30 @@ class RunIndex:
     # -------------------------------------------------------------- previews
 
     @staticmethod
+    def _render_value(value: Any) -> str | None:
+        """One-line, truncated rendering of a single field's value.
+
+        Strings pass through as-is; other JSON-able values are dumped first.
+        ``None`` means "nothing to show" and is preserved as ``None`` rather
+        than the string ``"None"``.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return _truncate(_one_line(value))
+        return _truncate(_one_line(json.dumps(value, ensure_ascii=False, default=str)))
+
+    @staticmethod
     def _render_preview(
         state: int,
         values: dict[str, Any] | None,
         error: dict[str, Any] | None,
     ) -> str | None:
-        """One-line preview string, truncated; hides ``__``-internal fields."""
+        """One-line preview string, truncated; hides ``__``-internal fields.
+
+        This is the step's *first* non-internal field only — for all of a
+        cell's produced fields, see ``_render_field_map``.
+        """
         if state == ERROR:
             etype = str((error or {}).get("type") or "Error")
             msg = str((error or {}).get("msg") or "")
@@ -646,14 +669,28 @@ class RunIndex:
             for key, value in values.items():
                 if key.startswith("__"):
                     continue
-                if value is None:
-                    return None
-                if isinstance(value, str):
-                    return _truncate(_one_line(value))
-                return _truncate(
-                    _one_line(json.dumps(value, ensure_ascii=False, default=str))
-                )
+                return RunIndex._render_value(value)
         return None
+
+    @staticmethod
+    def _render_field_map(
+        state: int, values: dict[str, Any] | None
+    ) -> dict[str, str | None] | None:
+        """Per-field rendered previews for an OK/CACHED cell.
+
+        One entry per non-internal field the step produced (same hiding and
+        truncation rules as ``_render_preview``), so the data grid can show
+        whichever field the column's field-chip currently selects. ``None``
+        for cells with nothing to render (error/retrying/pending/skipped, or
+        no values at all).
+        """
+        if state not in (OK, CACHED) or not values:
+            return None
+        return {
+            key: RunIndex._render_value(value)
+            for key, value in values.items()
+            if not key.startswith("__")
+        }
 
     # -------------------------------------------------------------- snapshot
 
@@ -1047,6 +1084,12 @@ class RunIndex:
                 cell = s.cells.get(r)
                 cells[s.name] = {
                     "v": cell.preview if cell else None,
+                    # Field -> rendered value, all of the step's produced
+                    # (non-internal) fields — what lets the data grid's
+                    # field-chip cycle the actually-rendered value, not just
+                    # the column label (accrue-ui#23). "v" above is kept for
+                    # back-compat; it is this map's first entry.
+                    "f": cell.preview_fields if cell else None,
                     "s": self._cells[base + j],
                 }
             rows.append({"row": r, "key": self.row_key(r), "cells": cells})

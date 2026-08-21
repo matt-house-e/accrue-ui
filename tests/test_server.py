@@ -264,14 +264,36 @@ def test_values_previews_hide_internal_fields(feature_log: Path):
     # Key comes from display_key ("domain") found in fetch outputs.
     assert rows[0]["key"] == "site0.com"
     # Preview = first NON-__ field; __web_context must never leak here.
-    assert rows[0]["cells"]["fetch"] == {"v": "site0.com", "s": OK}
+    assert rows[0]["cells"]["fetch"] == {
+        "v": "site0.com",
+        "f": {"domain": "site0.com", "summary": "summary 0"},
+        "s": OK,
+    }
     assert rows[2]["cells"]["fetch"]["s"] == CACHED
     # Long values truncate to 160 chars with an ellipsis.
     probe_preview = rows[0]["cells"]["probe"]["v"]
     assert len(probe_preview) == 160
     assert probe_preview.endswith("…")
+    # "f" carries every non-internal field, each truncated the same way.
+    probe_f = rows[0]["cells"]["probe"]["f"]["long"]
+    assert probe_f == probe_preview
     # Non-string values render as JSON.
-    assert rows[0]["cells"]["enrich"] == {"v": "true", "s": OK}
+    assert rows[0]["cells"]["enrich"] == {
+        "v": "true",
+        "f": {"enriched": "true"},
+        "s": OK,
+    }
+
+
+def test_values_field_map_null_for_errored_cell(feature_log: Path):
+    with client_for(feature_log) as client:
+        body = client.get(f"/api/values?start={ERROR_ROWS[0]}&count=1").json()
+    cell = body["rows"][0]["cells"]["fetch"]
+    assert cell["s"] == ERROR
+    assert cell["v"].startswith("RateLimitError")
+    # Errored cells have no produced fields to choose between -> f is null,
+    # so the client's field-chip lookup falls back to v (grid.js DataCell).
+    assert cell["f"] is None
 
 
 def test_cell_detail_full_values_include_internal(feature_log: Path):
