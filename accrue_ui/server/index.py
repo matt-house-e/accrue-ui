@@ -176,6 +176,12 @@ class RunIndex:
         self.display_key: str | None = None
         self.schema_v: int = SCHEMA_V
         self.plan: dict[str, Any] | None = None
+        #: The pipeline blueprint accrue introspects at run start
+        #: (``pipeline_start.manifest``, additive in the v1 contract): step
+        #: definitions with their types/models/params, the enrichment-field
+        #: schema, and the run config. ``None`` for older/metadata logs that
+        #: predate the manifest — the Overview view degrades in that case.
+        self.manifest: dict[str, Any] | None = None
         self.finished = False
         self.final_elapsed_s: float | None = None
         self.last_t = 0.0
@@ -319,6 +325,8 @@ class RunIndex:
             self.schema_v = v
         plan = data.get("plan")
         self.plan = plan if isinstance(plan, dict) else None
+        manifest = data.get("manifest")
+        self.manifest = manifest if isinstance(manifest, dict) else None
         self.started_at = _parse_iso(data.get("started_at"))
         for spec in data.get("steps") or []:
             name = spec.get("name")
@@ -745,11 +753,111 @@ class RunIndex:
             "error_groups": self._error_groups_block(),
             "cost": cost,
             "retry": self.retry_block(),
+            "overview": self.overview_block(cost["by_step"]),
         }
 
     def retry_block(self) -> dict[str, Any]:
         """``/api/run``'s retry block — availability comes from the controller."""
         return self.retry.block()
+
+    def overview_block(
+        self, by_step_cost: dict[str, float] | None = None
+    ) -> dict[str, Any]:
+        """The pipeline blueprint for the Overview view (docs/api-shapes.md).
+
+        Sourced from ``pipeline_start.manifest`` — accrue's introspection of
+        the pipeline at run start: each step's type, model + params, produced
+        fields, dependencies and condition, plus the enrichment-field schema
+        and the run config. Every manifest step is annotated with its *live*
+        outcome (rows done/errors and priced cost) by looking the step up by
+        name in the same per-step state that backs ``/api/run`` — so the
+        blueprint and the running numbers never diverge.
+
+        ``present`` is ``False`` for older/metadata logs that carry no
+        manifest; the view then degrades to what ``steps[]`` alone gives
+        rather than crashing. *by_step_cost* is the ``cost.by_step`` map (the
+        snapshot passes its own to avoid recomputing); omitted, it is derived.
+        """
+        manifest = self.manifest
+        if manifest is None:
+            return {"present": False}
+
+        if by_step_cost is None:
+            by_step_cost = self._cost_block()["by_step"]
+        live_by_name = {s.name: s for s in self._steps}
+
+        steps_out: list[dict[str, Any]] = []
+        providers: set[str] = set()
+        for spec in manifest.get("steps") or []:
+            if not isinstance(spec, dict):
+                continue
+            name = spec.get("name")
+            model = spec.get("model") if isinstance(spec.get("model"), dict) else None
+            if model and isinstance(model.get("provider"), str):
+                providers.add(model["provider"])
+            live = live_by_name.get(name) if isinstance(name, str) else None
+            steps_out.append(
+                {
+                    "name": name,
+                    # A type accrue could not introspect is "unknown" — render
+                    # it plainly rather than hiding the step.
+                    "type": spec.get("type") or "unknown",
+                    "model": model,  # null for FunctionSteps
+                    "produces": [
+                        p for p in (spec.get("produces") or []) if isinstance(p, str)
+                    ],
+                    "depends_on": [
+                        d for d in (spec.get("depends_on") or []) if isinstance(d, str)
+                    ],
+                    "condition": spec.get("condition"),  # may be null
+                    "level": live.level if live else 0,
+                    "mode": live.mode if live else "live",
+                    "outcome": {
+                        "done": live.done if live else 0,
+                        "total": live.total if live else 0,
+                        "errors": live.errors if live else 0,
+                        # number | null, exactly as cost.by_step: a step with no
+                        # priceable model contributes nothing and reads as an
+                        # em-dash, never a misleading $0.00.
+                        "cost": by_step_cost.get(name)
+                        if isinstance(name, str)
+                        else None,
+                    },
+                }
+            )
+
+        fields_out: list[dict[str, Any]] = []
+        for f in manifest.get("fields") or []:
+            if not isinstance(f, dict):
+                continue
+            fields_out.append(
+                {
+                    "name": f.get("name"),
+                    "type": f.get("type") or "unknown",
+                    "enum": f.get("enum") if isinstance(f.get("enum"), list) else None,
+                    "description": f.get("description")
+                    if isinstance(f.get("description"), str)
+                    else None,
+                    "step": f.get("step"),
+                    "internal": bool(f.get("internal")),
+                }
+            )
+
+        config = manifest.get("config")
+        version = manifest.get("accrue_version")
+        return {
+            "present": True,
+            "accrue_version": version if isinstance(version, str) else None,
+            "config": config if isinstance(config, dict) else {},
+            # The declared sample size (pipeline_start.num_rows), falling back
+            # to the widest row index seen when the log never declared one.
+            "sample_size": self._declared_rows
+            if self._declared_rows is not None
+            else self._nrows,
+            "providers": sorted(providers),
+            "steps": steps_out,
+            "fields": fields_out,
+        }
 
     # ---------------------------------------------------------------- deltas
 

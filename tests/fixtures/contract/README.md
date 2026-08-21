@@ -28,5 +28,21 @@ tabs (accrue-ui #14).
 - Source path: `tests/fixtures/run_captured.jsonl` (+ `.prompts.jsonl`)
 - Copied at commit: `79f0e06b068139c72cc880a117c5aad28d3e1c6d`
 
+## `run_manifest.jsonl` (+ `run_manifest.prompts.jsonl`)
+
+The manifest-bearing fixture: a 12-row, two-`LLMStep` run
+(`classify` -> `assess`) captured with `capture="prompts"`. Its
+`pipeline_start` record carries the v1-additive `manifest` — accrue's
+introspection of the pipeline at run start: per-step
+type/model/params/produces/depends_on/condition, the run `config`, and the
+enrichment-field schema (including an `enum` field, `icp_fit`). It drives the
+Overview view (accrue-ui #19) and the server-side `overview_block` parse.
+`run_small.jsonl` above has **no** manifest and stays the empty-state fixture.
+
+- Source: a real `accrue` v1.3.0 capture run against `openrouter`
+  (`google/gemini-3.5-flash-lite`).
+- Contract spec: `docs/guides/run-log.md` in the source repo
+  (`pipeline_start.manifest`).
+
 To refresh: re-copy the file(s) from accrue main and update the commit SHAs
 above. Do not hand-edit the JSONL.

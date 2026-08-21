@@ -130,6 +130,9 @@ Full snapshot of the run, including the complete cell-state array.
     "resume_command": "accrue-ui .accrue/runs/2026-08-17a.jsonl --pipeline enrich:pipeline",
     "running": false,              // a retry is in flight right now
     "last_error": null             // string | null: why the last retry task died
+  },
+  "overview": {                    // pipeline blueprint (see below); a log with
+    "present": false               // no manifest carries ONLY {"present": false}
   }
 }
 ```
@@ -158,6 +161,80 @@ Invariants the server must keep:
 - Row indices in the log outside `0..rows.total-1` are ignored, never
   grown into: a corrupt `row` cannot resize the grid. Without a declared
   `num_rows`, indices at or above 1,000,000 are treated as corrupt.
+
+### `overview` — the pipeline blueprint
+
+The Overview view (accrue-ui #19) renders the run's *definition* — steps,
+types, models, params, produced fields, and the enrichment-field schema — from
+the run log's `pipeline_start.manifest` (accrue's introspection of the pipeline
+at run start; contract: `docs/guides/run-log.md`). It is **read-only**:
+accrue-ui observes a run, it never configures the pipeline. The block rides
+`/api/run` (no separate route), so the same launch-token + Origin/Host
+middleware guards it.
+
+A log **without** a manifest — older runs, or a metadata capture tier that
+predates it — carries exactly `{"present": false}`; the view then degrades to
+what `steps[]` alone gives rather than crashing. When present:
+
+```jsonc
+"overview": {
+  "present": true,
+  "accrue_version": "1.3.0",       // string | null
+  "config": {                      // verbatim manifest.config; {} if absent
+    "max_workers": 6,
+    "caching": false,
+    "checkpointing": true,
+    "batch": false,
+    "capture": "prompts"           // "metadata" | "prompts" | "full"
+  },
+  "sample_size": 12,               // pipeline_start.num_rows (declared row count)
+  "providers": ["openrouter"],     // distinct step-model providers, sorted; a
+                                   // FunctionStep's null model contributes none
+  "steps": [                       // pipeline order (== /api/run steps order)
+    {
+      "name": "assess",
+      "type": "LLMStep",           // "unknown" if accrue could not introspect it
+      "model": {                   // null for FunctionSteps
+        "id": "google/gemini-3.5-flash-lite",
+        "provider": "openrouter",
+        "temperature": 0.2,
+        "max_tokens": 4000
+      },
+      "produces": ["one_liner", "icp_fit"],  // output field names
+      "depends_on": ["classify"],  // upstream step names (the DAG edges)
+      "condition": null,           // run-if expression, or null
+      "level": 1,                  // dependency level, from the live step
+      "mode": "live",              // "live" | "batch", from the live step
+      "outcome": {                 // live annotation, by step name
+        "done": 12,                // settled cells (ok+cached+error+skipped)
+        "total": 12,
+        "errors": 12,
+        "cost": 0.0027             // number | null, same rule/value as cost.by_step
+      }
+    }
+  ],
+  "fields": [                      // the enrichment-field schema
+    {
+      "name": "icp_fit",
+      "type": "enum",              // "str" | "int" | "enum" | ... | "unknown"
+      "enum": ["strong", "good", "weak"],  // list | null (only for enum types)
+      "description": "Fit as a customer for a developer-tools startup.",  // string | null
+      "step": "assess",            // the producing step
+      "internal": false            // true for "__"-prefixed inter-step fields
+    }
+  ]
+}
+```
+
+- `steps[].outcome` is looked up by name in the same per-step state that backs
+  the top-level `steps[]`, so the blueprint and the running numbers never
+  diverge: `outcome.done/total/errors` equal the matching `steps[]` entry, and
+  `outcome.cost` equals `cost.by_step[name]` (null when the step's model cannot
+  be priced — an em-dash, never `$0.00`).
+- `type` is `"unknown"` for a step or field accrue could not introspect; render
+  it plainly rather than hiding it.
+- `sample_size` is the declared `num_rows`, falling back to the widest row
+  index seen if the log never declared one.
 
 ## `GET /api/values?start=A&count=N`
 

@@ -23,6 +23,7 @@ import { Grid } from "./views/grid.js";
 import { Inspector } from "./views/inspector.js";
 import { Triage } from "./views/triage.js";
 import { Cost } from "./views/cost.js";
+import { Overview } from "./views/overview.js";
 
 function Logo() {
   return html`<svg
@@ -124,6 +125,12 @@ function TabRow({ snap }) {
       onClick=${() => (activeTab.value = "grid")}
     >
       Run grid
+    </button>
+    <button
+      class=${`tab${tab === "overview" ? " active" : ""}`}
+      onClick=${() => (activeTab.value = "overview")}
+    >
+      Overview
     </button>
     <button
       class=${`tab${tab === "errors" ? " active" : ""}`}
@@ -306,6 +313,7 @@ function App() {
     <${TabRow} snap=${snap} />
     <${StatsStrip} snap=${snap} />
     ${tab === "grid" && html`<${Grid} />`}
+    ${tab === "overview" && html`<${Overview} />`}
     ${tab === "errors" && html`<${Triage} />`}
     ${tab === "cost" && html`<${Cost} />`}
     ${selection.value && html`<${Inspector} />`}
