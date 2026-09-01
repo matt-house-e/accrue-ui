@@ -318,14 +318,17 @@ over-wide window is a refetch loop, not a retry.
   already truncated), or `null` when there is nothing to show (pending,
   running, most skips). For error/retrying cells `v` MAY carry a short error
   preview (e.g. `"RateLimitError · 3 attempts"`). Kept for back-compat; it is
-  always `f`'s first entry when `f` is non-null.
-- `f` — field name -> rendered preview string, one entry per non-internal
-  field the step produced (same truncation rules as `v`), or `null` for
-  cells with nothing to render (pending/running/error/retrying/skipped, or a
-  step with no values yet). This is what lets the data grid's field-chip
-  actually switch the rendered value, not just the column label
-  (accrue-ui#23) — a client must read the chosen field out of `f`, not
-  assume `v` tracks the selection.
+  always `f`'s first non-internal entry when `f` is non-null.
+- `f` — field name -> rendered preview string, one entry per field the step
+  produced (same truncation rules as `v`), or `null` for cells with nothing
+  to render (pending/running/error/retrying/skipped, or a step with no
+  values yet). `"__"`-prefixed internal fields **are** included, matching
+  `steps[].fields` in the snapshot: the UI hides them by default but can be
+  toggled to show them, and a map that omitted them rendered those cells
+  blank (accrue-ui#25). Hiding is the client's decision. This is what lets
+  the data grid's field-chip actually switch the rendered value, not just
+  the column label (accrue-ui#23) — a client must read the chosen field out
+  of `f`, not assume `v` tracks the selection.
 - `s` — the cell-state byte, same encoding as `cells.data`.
 
 ## `GET /api/cell/{step}/{row}`

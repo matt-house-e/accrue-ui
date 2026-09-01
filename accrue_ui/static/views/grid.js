@@ -9,15 +9,14 @@ import {
   cellStates,
   cycleField,
   errorGroupFor,
-  fieldChoice,
   loadValues,
   rowFilter,
   searchQuery,
   select,
+  selectedField,
   selection,
   snapshot,
   sseStatus,
-  stepFields,
   valuesCache,
   valuesVersion,
   viewMode,
@@ -93,8 +92,7 @@ function missingWindows(rows, first, last) {
 }
 
 function ColumnHead({ step, stepIndex, mode }) {
-  const fields = stepFields(step);
-  const field = fieldChoice.value[step.name] || fields[0] || null;
+  const field = selectedField(step);
   return html`<div class="col-head" key=${step.name}>
     <div class="step-name">
       ${step.name}
@@ -130,11 +128,13 @@ function DataCell({ step, stepName, row, state, vrow }) {
   const sel = selection.value;
   const isSel = sel && sel.step === stepName && sel.row === row;
   const cell = vrow && vrow.cells ? vrow.cells[stepName] : null;
-  // Reading fieldChoice.value here subscribes this cell, so it re-renders
-  // when the column's field-chip cycles (accrue-ui#23) — cell.f carries all
-  // of the step's produced fields, keyed by name; cell.v (its first entry)
-  // is the fallback for cells with no field map (error/retrying/etc).
-  const field = fieldChoice.value[stepName] || stepFields(step)[0];
+  // selectedField reads fieldChoice and the internal-fields toggle, which
+  // subscribes this cell to both, so it re-renders when the column's chip
+  // cycles (accrue-ui#23) — cell.f carries every field the step produced,
+  // internal ones included (accrue-ui#25), keyed by name; cell.v (its first
+  // non-internal entry) is the fallback for cells with no field map
+  // (error/retrying/etc).
+  const field = selectedField(step);
   const v = cell && cell.f ? cell.f[field] : cell ? cell.v : null;
   let body;
   if (state === 5) {
