@@ -5,10 +5,71 @@
 // manifest (older/metadata runs) degrades to what steps[] alone reveals.
 import { Fragment } from "preact";
 import { html } from "../lib/html.js";
-import { fmtClock, fmtInt, fmtMoney, fmtPct } from "../lib/fmt.js";
+import {
+  fmtClock,
+  fmtDuration,
+  fmtInt,
+  fmtLatency,
+  fmtMoney,
+  fmtPct,
+} from "../lib/fmt.js";
 import { snapshot } from "../lib/store.js";
 
 const DASH = "—";
+
+// row_attempt.status -> the label the card/tooltip shows. Anything unmapped
+// falls back to "kebab-cased" (rate_limited -> rate-limited), so a status the
+// log adds later still renders readably rather than blank.
+const STATUS_LABEL = {
+  rate_limited: "rate-limited",
+  timeout: "timeout",
+  api_error: "api-error",
+  parse_error: "parse-error",
+  validation_error: "validation-error",
+};
+function statusLabel(s) {
+  return STATUS_LABEL[s] || String(s || "").replace(/_/g, "-");
+}
+
+// Per-step timing for the card: wall-clock headline + p50/p95 secondary.
+// - in-progress (step has no step_end): a running state, never a final number
+//   — "running" while the run is live, an em-dash on a cold interrupted run.
+// - batch: wall-clock only, no per-row percentiles (their elapsed_ms includes
+//   provider queue time, so a per-row latency would mislead).
+function stepTiming(o, live) {
+  // `ended` is a boolean on every manifest-path outcome and absent on the
+  // degraded (manifest-less) one — which carries no timing at all, so there is
+  // nothing to show rather than a misleading em-dash.
+  if (!o || o.ended === undefined) return null;
+  if (!o.ended) {
+    // Running only reads as motion on a live run; a cold interrupted step
+    // shows an em-dash, not a fake "running".
+    return { wall: live ? "running" : DASH, isRunning: live, lat: null };
+  }
+  const l = o.latency_ms;
+  // Whole-ms display: the server keeps sub-ms precision for the API, but a
+  // card reading "853.495ms" is noise — round for the eye.
+  const lat = l
+    ? `p50 ${fmtLatency(Math.round(l.p50))} / p95 ${fmtLatency(Math.round(l.p95))}`
+    : null;
+  return { wall: fmtDuration(o.wall_s) ?? DASH, isRunning: false, lat };
+}
+
+// Full status + kind breakdown for the retry chip's hover tooltip (the shared
+// body-portaled tooltip layer picks up `data-tip`; its CSS is pre-line, so
+// newlines separate the two axes).
+function retryTip(r) {
+  const status = Object.entries(r.by_status || {})
+    .map(([k, v]) => `${statusLabel(k)} ${fmtInt(v)}`)
+    .join(" · ");
+  const kind = Object.entries(r.by_kind || {})
+    .map(([k, v]) => `${k} ${fmtInt(v)}`)
+    .join(" · ");
+  const lines = [`${fmtInt(r.count)} retries`];
+  if (status) lines.push(`by status: ${status}`);
+  if (kind) lines.push(`by kind: ${kind}`);
+  return lines.join("\n");
+}
 
 // "LLMStep" -> "LLM", "FunctionStep" -> "fn"; anything else renders plainly,
 // minus a trailing "Step" (an unintrospectable type stays readable, not blank).
@@ -114,6 +175,13 @@ function Summary({ snap, ov }) {
       tone=${cfg.batch ? "violet" : ""}
       tip="Whether the run used a provider batch API (discounted, higher latency)."
     />
+    <${Metric}
+      value=${fmtDuration(ov.pipeline_wall_s ?? run.elapsed_s) ?? DASH}
+      label="Duration"
+      tip=${live
+        ? "Pipeline wall-clock so far — total time since the run started."
+        : "Total pipeline wall-clock (pipeline_end.elapsed_s), start to finish."}
+    />
     <span class="ov-spring"></span>
     <div class="ov-versions mono">
       <div>accrue v${ov.accrue_version || "?"}</div>
@@ -124,17 +192,66 @@ function Summary({ snap, ov }) {
   </div>`;
 }
 
-function StepCard({ step, internalSet }) {
+// The retry chip: "· R retries · 9 rate-limited" with the dominant failure
+// bucket surfaced and the full status/kind breakdown on hover (the shared
+// tooltip layer reads data-tip). Omitted entirely when the step never retried
+// (r is null / count 0) — noise reduction, per the resolved design.
+function RetryChip({ retry }) {
+  if (!retry || !retry.count) return null;
+  const dom = retry.dominant;
+  return html`<span class="ov-retry mono" data-tip=${retryTip(retry)}>
+    · ${fmtInt(retry.count)} ${retry.count === 1 ? "retry" : "retries"}${dom
+      ? html`
+          <span class="ov-retry-dom"
+            >· ${fmtInt(dom.count)} ${statusLabel(dom.status)}</span
+          >`
+      : ""}
+  </span>`;
+}
+
+// The wall-clock + p50/p95 cluster shown next to cost. Batch steps carry no
+// per-row percentiles (the server sends latency_ms: null); the wall-clock is
+// then tagged "batch" so the single number is not mistaken for call latency.
+function Timing({ o, live, batch }) {
+  const t = stepTiming(o, live);
+  if (!t) return null;
+  return html`<span class=${`ov-time mono${t.isRunning ? " running" : ""}`}>
+    ${t.wall}${t.lat
+      ? html` <span class="ov-lat">· ${t.lat}</span>`
+      : batch && !t.isRunning
+        ? html` <span class="ov-lat">· batch</span>`
+        : ""}
+  </span>`;
+}
+
+// System-prompt panel (accrue #140 display): the step's row-independent
+// system prompt — the exact cached prefix — collapsed by default, expandable.
+// Native <details> so there is no per-card open/closed state to track. Absent
+// for FunctionSteps / steps whose prompt is null.
+function SystemPrompt({ prompt, name }) {
+  if (typeof prompt !== "string" || prompt === "") return null;
+  return html`<details class="ov-prompt">
+    <summary class="ov-prompt-head">
+      <span class="ov-prompt-title">System prompt</span>
+      <span class="ov-prompt-tag mono">${name} · row-independent · cached prefix</span>
+      <span class="ov-prompt-chev" aria-hidden="true">▸</span>
+    </summary>
+    <pre class="ov-prompt-body mono">${prompt}</pre>
+  </details>`;
+}
+
+function StepCard({ step, live, internalSet }) {
   const o = step.outcome || {};
   const model = step.model;
   const ok = Math.max(0, (o.done || 0) - (o.errors || 0));
   const cond = step.condition;
+  const batch = step.mode === "batch";
   return html`<div class="ov-card">
     <div class="ov-card-head">
       <span class="ov-level">L${step.level}</span>
       <span class="ov-name">${step.name}</span>
       ${step.type && html`<span class="ov-tag">${typeTag(step.type)}</span>`}
-      ${step.mode === "batch" && html`<span class="ov-tag batch">batch</span>`}
+      ${batch && html`<span class="ov-tag batch">batch</span>`}
       ${cond != null &&
       html`<span class="ov-tag conditional">conditional</span>
         ${typeof cond === "string" &&
@@ -144,7 +261,9 @@ function StepCard({ step, internalSet }) {
         ${fmtInt(ok)} ok${o.errors > 0
           ? html` <span class="err">· ${fmtInt(o.errors)} err</span>`
           : ""}
+        <${RetryChip} retry=${o.retry} />
       </span>
+      <${Timing} o=${o} live=${live} batch=${batch} />
       <span class="ov-cost mono">${fmtMoney(o.cost) ?? DASH}</span>
     </div>
     <div class="ov-card-body">
@@ -164,6 +283,7 @@ function StepCard({ step, internalSet }) {
         >`
       )}
     </div>
+    <${SystemPrompt} prompt=${step.system_prompt} name=${step.name} />
   </div>`;
 }
 
@@ -187,7 +307,7 @@ function Pipeline({ steps, live, internalSet }) {
                 <span class=${`ov-node ${nodeState(step.outcome, live)}`}></span>
                 ${i < nSteps - 1 && html`<span class="ov-line"></span>`}
               </div>
-              <${StepCard} step=${step} internalSet=${internalSet} />
+              <${StepCard} step=${step} live=${live} internalSet=${internalSet} />
             </${Fragment}>`
           )}
         </div>`}

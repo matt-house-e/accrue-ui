@@ -188,6 +188,10 @@ what `steps[]` alone gives rather than crashing. When present:
     "capture": "prompts"           // "metadata" | "prompts" | "full"
   },
   "sample_size": 12,               // pipeline_start.num_rows (declared row count)
+  "pipeline_wall_s": 4.72,         // number | null: total pipeline wall-clock
+                                   // (pipeline_end.elapsed_s); null until the
+                                   // run ends — the view falls back to
+                                   // run.elapsed_s for a live run
   "providers": ["openrouter"],     // distinct step-model providers, sorted; a
                                    // FunctionStep's null model contributes none
   "steps": [                       // pipeline order (== /api/run steps order)
@@ -200,6 +204,11 @@ what `steps[]` alone gives rather than crashing. When present:
         "temperature": 0.2,
         "max_tokens": 4000
       },
+      "system_prompt": "You are ...",  // string | null: the step's row-
+                                   // independent system prompt (the exact
+                                   // cached prefix, #107), secret-redacted by
+                                   // accrue. null for FunctionSteps / steps
+                                   // without one (accrue manifest #140)
       "produces": ["one_liner", "icp_fit"],  // output field names
       "depends_on": ["classify"],  // upstream step names (the DAG edges)
       "condition": null,           // run-if expression, or null
@@ -209,7 +218,38 @@ what `steps[]` alone gives rather than crashing. When present:
         "done": 12,                // settled cells (ok+cached+error+skipped)
         "total": 12,
         "errors": 12,
-        "cost": 0.0027             // number | null, same rule/value as cost.by_step
+        "cost": 0.0027,            // number | null, same rule/value as cost.by_step
+        "wall_s": 1.66,            // number | null: step wall-clock
+                                   // (step_end.elapsed_s, max over segments);
+                                   // null until the step ends
+        "ended": true,             // step_end seen — false => in progress, and
+                                   // the card shows a running state, not a
+                                   // final duration
+        "latency_ms": {            // per-row latency, cached rows EXCLUDED
+                                   // (cached cells settle in ~0ms). null for
+                                   // batch steps (their elapsed_ms includes
+                                   // provider queue time) and steps with no
+                                   // timed, non-cached row yet
+          "p50": 632.9,
+          "p95": 887.3,
+          "n": 12                  // sample count behind the percentiles
+        },
+        "retry": {                 // object | null: null when the step never
+                                   // retried (count 0), so the card omits the
+                                   // chip. Emitted at every capture tier —
+                                   // row_attempt lands even at capture=metadata
+          "count": 47,             // row_attempt records with attempt > 1
+          "by_status": {           // FAILED attempts (status != "ok") by
+                                   // status, descending — the retry reasons
+            "rate_limited": 41,
+            "timeout": 6
+          },
+          "by_kind": { "api": 47 },  // same failed attempts by kind (api/parse)
+          "dominant": {            // the top by_status bucket, for the chip
+            "status": "rate_limited",
+            "count": 41
+          }
+        }
       }
     }
   ],
@@ -235,6 +275,14 @@ what `steps[]` alone gives rather than crashing. When present:
   it plainly rather than hiding it.
 - `sample_size` is the declared `num_rows`, falling back to the widest row
   index seen if the log never declared one.
+- `outcome.latency_ms` percentiles are computed over the same per-row
+  `elapsed_ms` the inspector shows, with `from_cache` rows dropped, so the
+  numbers reconcile with the per-cell timelines. `outcome.retry.count` equals
+  the number of `attempt > 1` records across the step's cells — the same
+  attempt timelines `/api/cell` renders — and `by_status`/`by_kind` tally the
+  failed (`status != "ok"`) attempts. Both are additive over the v0.2 shape:
+  an older log with no `row_attempt`/`step_end` simply reports `retry: null`
+  and `latency_ms: null`.
 
 ## `GET /api/values?start=A&count=N`
 

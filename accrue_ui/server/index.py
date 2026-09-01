@@ -120,6 +120,21 @@ class StepState:
     end_out: int = 0
     end_cost: float | None = None  # priced dollars from step_end aggregate
     ended: bool = False
+    # --- timing (P21) -----------------------------------------------------
+    #: step_end.elapsed_s — the step's wall-clock, start->finish. ``max`` over
+    #: segments (a retry_failed segment re-opens the step and emits its own,
+    #: shorter step_end; the main pass is the meaningful wall-clock).
+    elapsed_s: float | None = None
+    # --- retries (P22) ----------------------------------------------------
+    #: row_attempt records with ``attempt > 1`` — attempts beyond the first for
+    #: a (step, row), i.e. retries. The counter is monotonic 1-based per cell
+    #: across the api+parse loops, so this never double-counts within a cell.
+    retries: int = 0
+    #: FAILED attempts (``status != "ok"``) bucketed by ``status`` and by
+    #: ``kind`` (api/parse) — the *reasons* the step retried, for the card's
+    #: dominant bucket and hover breakdown.
+    retry_status: dict[str, int] = field(default_factory=dict)
+    retry_kind: dict[str, int] = field(default_factory=dict)
 
     @property
     def is_batch(self) -> bool:
@@ -443,7 +458,20 @@ class RunIndex:
         if len(cell.attempt_events) > MAX_CELL_EVENTS:
             del cell.attempt_events[:-MAX_CELL_EVENTS]
 
+        # --- retry aggregation (P22) -------------------------------------
+        # A row_attempt record is applied exactly once (append-only log), so
+        # incrementing here never double-counts — unlike row_complete, which
+        # is re-delivered by retry segments and must be unwound.
         status = data.get("status")
+        attempt_no = data.get("attempt")
+        if isinstance(attempt_no, int) and attempt_no > 1:
+            step.retries += 1
+        if isinstance(status, str) and status != "ok":
+            step.retry_status[status] = step.retry_status.get(status, 0) + 1
+            kind = data.get("kind")
+            if isinstance(kind, str):
+                step.retry_kind[kind] = step.retry_kind.get(kind, 0) + 1
+
         if status is not None and status != "ok":
             pos = row * len(self._steps) + idx
             if self._cells[pos] not in TERMINAL:
@@ -610,6 +638,12 @@ class RunIndex:
             return
         step = self._step(name)
         step.ended = True
+        elapsed = data.get("elapsed_s")
+        if isinstance(elapsed, (int, float)):
+            # max over segments: a retry_failed segment re-opens the step with
+            # a fresh, shorter step_end; the main pass is the wall-clock worth
+            # showing, and the two segments do not overlap in wall time anyway.
+            step.elapsed_s = max(step.elapsed_s or 0.0, float(elapsed))
         usage = data.get("usage")
         if isinstance(usage, dict):
             tokens_in = usage.get("in") if isinstance(usage.get("in"), int) else 0
@@ -833,6 +867,7 @@ class RunIndex:
             if model and isinstance(model.get("provider"), str):
                 providers.add(model["provider"])
             live = live_by_name.get(name) if isinstance(name, str) else None
+            sys_prompt = spec.get("system_prompt")
             steps_out.append(
                 {
                     "name": name,
@@ -840,6 +875,12 @@ class RunIndex:
                     # it plainly rather than hiding the step.
                     "type": spec.get("type") or "unknown",
                     "model": model,  # null for FunctionSteps
+                    # The row-independent system prompt (the exact cached
+                    # prefix, #107), secret-redacted by accrue. null for
+                    # FunctionSteps / steps without one — the panel is omitted.
+                    "system_prompt": sys_prompt
+                    if isinstance(sys_prompt, str)
+                    else None,
                     "produces": [
                         p for p in (spec.get("produces") or []) if isinstance(p, str)
                     ],
@@ -859,6 +900,20 @@ class RunIndex:
                         "cost": by_step_cost.get(name)
                         if isinstance(name, str)
                         else None,
+                        # --- timing (P21) --------------------------------
+                        # Wall-clock (step_end.elapsed_s); null until the step
+                        # ends. `ended` lets the view show a running state
+                        # instead of a final duration for in-progress steps.
+                        "wall_s": live.elapsed_s if live else None,
+                        "ended": bool(live.ended) if live else False,
+                        # p50/p95 of per-row latency, cached rows EXCLUDED;
+                        # null for batch steps and steps with no timed row.
+                        "latency_ms": self._step_latency(live) if live else None,
+                        # --- retries (P22) -------------------------------
+                        # {count, by_status, by_kind, dominant}; null when the
+                        # step never retried (count == 0) so the card can omit
+                        # the chip entirely.
+                        "retry": self._step_retry(live) if live else None,
                     },
                 }
             )
@@ -891,9 +946,69 @@ class RunIndex:
             "sample_size": self._declared_rows
             if self._declared_rows is not None
             else self._nrows,
+            # Total pipeline wall-clock (pipeline_end.elapsed_s); null until the
+            # run ends. For a live run the view falls back to run.elapsed_s.
+            "pipeline_wall_s": self.final_elapsed_s,
             "providers": sorted(providers),
             "steps": steps_out,
             "fields": fields_out,
+        }
+
+    def _step_latency(self, step: StepState) -> dict[str, Any] | None:
+        """p50/p95 of per-row latency for a step, cached rows EXCLUDED (P21).
+
+        Cached cells settle in ~0ms (no API call happened), so counting them
+        would drag the percentiles toward zero and understate real call
+        latency — they are dropped from the distribution. Batch steps get
+        ``None``: their per-row ``elapsed_ms`` includes provider queue time, so
+        a per-row latency there is misleading (the card shows wall-clock only).
+        ``None`` when no timed, non-cached row exists yet.
+
+        Sourced from the same ``cell.elapsed_ms`` the inspector shows, so the
+        percentiles reconcile with the per-cell timelines.
+        """
+        if step is None or step.is_batch:
+            return None
+        samples = sorted(
+            c.elapsed_ms
+            for c in step.cells.values()
+            if c.elapsed_ms is not None and not c.from_cache
+        )
+        if not samples:
+            return None
+        return {
+            "p50": round(_percentile(samples, 0.50), 3),
+            "p95": round(_percentile(samples, 0.95), 3),
+            "n": len(samples),
+        }
+
+    def _step_retry(self, step: StepState) -> dict[str, Any] | None:
+        """Per-step retry aggregation for the Overview card (P22).
+
+        ``count`` = row_attempt records with ``attempt > 1`` (attempts beyond
+        the first for a cell). ``by_status`` / ``by_kind`` tally the *failed*
+        attempts (``status != "ok"``) — the reasons the step retried — and
+        ``dominant`` names the top status bucket for the card's inline chip.
+        ``None`` when the step never retried, so the card omits the chip
+        entirely (noise reduction). Works at every capture tier: row_attempt
+        is emitted even at ``capture="metadata"``.
+        """
+        if step is None or step.retries <= 0:
+            return None
+        by_status = dict(
+            sorted(step.retry_status.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        dominant = None
+        if by_status:
+            name, count = next(iter(by_status.items()))
+            dominant = {"status": name, "count": count}
+        return {
+            "count": step.retries,
+            "by_status": by_status,
+            "by_kind": dict(
+                sorted(step.retry_kind.items(), key=lambda kv: (-kv[1], kv[0]))
+            ),
+            "dominant": dominant,
         }
 
     # ---------------------------------------------------------------- deltas
@@ -1318,6 +1433,22 @@ class RunIndex:
 def _error_type(error: dict[str, Any] | None) -> str:
     """Group key for a failure; the v1 log's error object may be null."""
     return str((error or {}).get("type") or "Error")
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float:
+    """Linear-interpolation percentile of a *pre-sorted* list (numpy default).
+
+    ``q`` in ``0..1``. Interpolates between the two ranks straddling the
+    target position, so p50 of an even-length list is the mean of the middle
+    pair and a small sample never snaps to a misleading exact member. Assumes
+    a non-empty, ascending input (the one caller guarantees both).
+    """
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = q * (len(sorted_vals) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
 
 
 def _prompt_ref(raw: Any) -> dict[str, int] | None:
