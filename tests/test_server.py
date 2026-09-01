@@ -456,6 +456,28 @@ def test_interrupted_old_run_is_not_live(tmp_path: Path):
     assert runs[0]["live"] is False
 
 
+def test_runs_listing_skips_capture_sidecars(tmp_path: Path):
+    """`<run>.prompts.jsonl` is a sidecar of a run, not a run (accrue-ui#27).
+
+    It matches the `*.jsonl` discovery glob and sits in the same directory,
+    so the picker used to offer a bogus "live.prompts" entry beside "live" —
+    and selecting it would load a file holding no run records at all.
+    """
+    log = tmp_path / "live.jsonl"
+    write_log(log, _feature_records())
+    age_file(log)
+    # A capture sidecar: prompt bodies, no run records, same directory.
+    sidecar = tmp_path / "live.prompts.jsonl"
+    write_log(sidecar, [{"messages": [], "response": "body", "parsed": None}])
+    age_file(sidecar, seconds=1.0)  # newer than the log, as in a real run
+
+    with client_for(log) as client:
+        runs = client.get("/api/runs").json()["runs"]
+
+    assert [r["name"] for r in runs] == ["live"]
+    assert not any(r["path"].endswith(".prompts.jsonl") for r in runs)
+
+
 def test_bogus_row_index_is_ignored(tmp_path: Path):
     """One corrupt `row` must not resize the grid to millions of cells."""
     log = tmp_path / "bogus.jsonl"

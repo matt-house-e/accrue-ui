@@ -2,8 +2,9 @@
 
 ``accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--port 7607]
 [--no-browser]`` resolves the run log (explicit path, else the newest
-``*.jsonl`` under ``./.accrue/runs``), generates a fresh URL-safe launch
-token, builds the server app, **binds the loopback port**, and only then
+``*.jsonl`` under ``./.accrue/runs``, capture sidecars skipped), generates a
+fresh URL-safe launch token, builds the server app, **binds the loopback
+port**, and only then
 prints the tokenized URL and opens the browser — uvicorn serves on the
 socket already in hand, bound to **127.0.0.1 only**, hardcoded, no flag to
 widen it (see ``server/security.py`` for the threat model).
@@ -32,6 +33,7 @@ from fastapi import FastAPI
 
 from . import __version__
 from .server.app import create_app
+from .server.index import is_sidecar
 
 #: Loopback only, on purpose. There is deliberately no --host flag.
 HOST = "127.0.0.1"
@@ -87,10 +89,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def newest_run_log(runs_dir: Path = RUNS_DIR) -> Path | None:
-    """The most recently modified ``*.jsonl`` under *runs_dir*, if any."""
+    """The most recently modified run log under *runs_dir*, if any.
+
+    Capture sidecars (``<run>.prompts.jsonl``) match the same glob and are
+    written alongside the run they belong to, so the newest ``*.jsonl`` in
+    the directory is often a sidecar rather than a log — launching on one
+    would serve a file with no run records in it (accrue-ui#27).
+    """
     if not runs_dir.is_dir():
         return None
-    logs = [p for p in runs_dir.glob("*.jsonl") if p.is_file()]
+    logs = [p for p in runs_dir.glob("*.jsonl") if p.is_file() and not is_sidecar(p)]
     return max(logs, key=lambda p: p.stat().st_mtime, default=None)
 
 

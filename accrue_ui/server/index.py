@@ -66,6 +66,26 @@ MAX_CELL_EVENTS = 50
 #: seek-by-offset design exists to avoid.
 MAX_PROMPT_BODY_BYTES = 16 * 1024 * 1024
 SCHEMA_V = 1
+#: Prompt/response capture sidecar written beside the run log, the same rule
+#: accrue's ``prompt_sidecar_path`` uses: ``<run>.jsonl`` -> ``<run>.prompts.jsonl``.
+PROMPT_SIDECAR_SUFFIX = ".prompts.jsonl"
+#: Every suffix accrue writes beside a run log — files that sit in the run
+#: directory and end in ``.jsonl`` but are not run logs. Discovery globs have
+#: to skip them, or the picker offers a bogus ``live.prompts`` entry next to
+#: ``live`` and selecting it loads a file with no run records in it
+#: (accrue-ui#27). One tuple, so a second sidecar kind is added here rather
+#: than in each caller.
+SIDECAR_SUFFIXES = (PROMPT_SIDECAR_SUFFIX,)
+
+
+def sidecar_path(log_path: str | Path) -> Path:
+    """The prompt sidecar that belongs to *log_path*."""
+    return Path(log_path).with_suffix(PROMPT_SIDECAR_SUFFIX)
+
+
+def is_sidecar(path: str | Path) -> bool:
+    """Is *path* a sidecar beside some run log, rather than a run log itself?"""
+    return Path(path).name.endswith(SIDECAR_SUFFIXES)
 
 
 @dataclass(slots=True)
@@ -183,11 +203,10 @@ class RunIndex:
 
     def __init__(self, path: str | Path, retry: RetryController | None = None):
         self.path = Path(path)
-        #: Prompt sidecar beside the run log — ``<run>.prompts.jsonl``, the same
-        #: rule accrue's ``prompt_sidecar_path`` uses. Present only when the run
-        #: captured bodies (``capture="prompts"``/``"full"``); ``/api/cell``
-        #: seeks into it by offset and never reads it whole.
-        self._sidecar_path = self.path.with_suffix(".prompts.jsonl")
+        #: Prompt sidecar beside the run log — ``<run>.prompts.jsonl``. Present
+        #: only when the run captured bodies (``capture="prompts"``/``"full"``);
+        #: ``/api/cell`` seeks into it by offset and never reads it whole.
+        self._sidecar_path = sidecar_path(self.path)
         #: Retry orchestration for this run (``POST /api/retry``); a bare
         #: controller with no ``--pipeline`` simply reports unavailable.
         self.retry = retry if retry is not None else RetryController(path)
@@ -1552,6 +1571,10 @@ def scan_runs(directory: str | Path) -> list[dict[str, Any]]:
     if not directory.is_dir():
         return runs
     for path in directory.glob("*.jsonl"):
+        # `<run>.prompts.jsonl` capture sidecars live right beside their run
+        # log and match the glob; they are not runs (accrue-ui#27).
+        if is_sidecar(path):
+            continue
         try:
             st = path.stat()
         except OSError:
