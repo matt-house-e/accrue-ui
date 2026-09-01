@@ -73,6 +73,16 @@ export function stepFields(step) {
   return showInternalFields.value ? fields : fields.filter((f) => !f.startsWith("__"));
 }
 
+// The field a step's data column is currently showing: the chip's choice,
+// but only while it is still visible. Cycling onto an internal field and
+// then hiding internal fields would otherwise leave the column rendering a
+// field the toggle says is hidden — fall back to the first visible one.
+export function selectedField(step) {
+  const fields = stepFields(step);
+  const choice = fieldChoice.value[step.name];
+  return choice && fields.includes(choice) ? choice : fields[0] || null;
+}
+
 // Is a retry in flight? True from the moment we POST until the server stops
 // reporting retry.running, so every retry button disables together.
 export function retryBusy() {
@@ -247,7 +257,7 @@ export function closeInspector() {
 export function cycleField(step) {
   const fields = stepFields(step);
   if (fields.length < 2) return;
-  const current = fieldChoice.value[step.name] || fields[0];
+  const current = selectedField(step);
   const next = fields[(fields.indexOf(current) + 1) % fields.length];
   fieldChoice.value = { ...fieldChoice.value, [step.name]: next };
 }

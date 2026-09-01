@@ -66,6 +66,26 @@ MAX_CELL_EVENTS = 50
 #: seek-by-offset design exists to avoid.
 MAX_PROMPT_BODY_BYTES = 16 * 1024 * 1024
 SCHEMA_V = 1
+#: Prompt/response capture sidecar written beside the run log, the same rule
+#: accrue's ``prompt_sidecar_path`` uses: ``<run>.jsonl`` -> ``<run>.prompts.jsonl``.
+PROMPT_SIDECAR_SUFFIX = ".prompts.jsonl"
+#: Every suffix accrue writes beside a run log — files that sit in the run
+#: directory and end in ``.jsonl`` but are not run logs. Discovery globs have
+#: to skip them, or the picker offers a bogus ``live.prompts`` entry next to
+#: ``live`` and selecting it loads a file with no run records in it
+#: (accrue-ui#27). One tuple, so a second sidecar kind is added here rather
+#: than in each caller.
+SIDECAR_SUFFIXES = (PROMPT_SIDECAR_SUFFIX,)
+
+
+def sidecar_path(log_path: str | Path) -> Path:
+    """The prompt sidecar that belongs to *log_path*."""
+    return Path(log_path).with_suffix(PROMPT_SIDECAR_SUFFIX)
+
+
+def is_sidecar(path: str | Path) -> bool:
+    """Is *path* a sidecar beside some run log, rather than a run log itself?"""
+    return Path(path).name.endswith(SIDECAR_SUFFIXES)
 
 
 @dataclass(slots=True)
@@ -80,9 +100,10 @@ class Cell:
     t: float | None = None  # log-time of the terminal record
     values: dict[str, Any] | None = None
     preview: str | None = None
-    #: field name -> rendered preview string, one entry per non-internal
-    #: field this cell's step produced (same truncation as ``preview``, which
-    #: is just this map's first entry). Populated for OK/CACHED cells only.
+    #: field name -> rendered preview string, one entry per field this cell's
+    #: step produced — ``__``-internal fields included, because the data grid
+    #: can be asked to show them (same truncation as ``preview``, which is
+    #: this map's first non-internal entry). Populated for OK/CACHED cells only.
     preview_fields: dict[str, str | None] | None = None
     #: One entry per row_complete seen for this cell: (offset, length,
     #: from_a_retry_segment). The bytes are re-read on demand; the flag is
@@ -182,11 +203,10 @@ class RunIndex:
 
     def __init__(self, path: str | Path, retry: RetryController | None = None):
         self.path = Path(path)
-        #: Prompt sidecar beside the run log — ``<run>.prompts.jsonl``, the same
-        #: rule accrue's ``prompt_sidecar_path`` uses. Present only when the run
-        #: captured bodies (``capture="prompts"``/``"full"``); ``/api/cell``
-        #: seeks into it by offset and never reads it whole.
-        self._sidecar_path = self.path.with_suffix(".prompts.jsonl")
+        #: Prompt sidecar beside the run log — ``<run>.prompts.jsonl``. Present
+        #: only when the run captured bodies (``capture="prompts"``/``"full"``);
+        #: ``/api/cell`` seeks into it by offset and never reads it whole.
+        self._sidecar_path = sidecar_path(self.path)
         #: Retry orchestration for this run (``POST /api/retry``); a bare
         #: controller with no ``--pipeline`` simply reports unavailable.
         self.retry = retry if retry is not None else RetryController(path)
@@ -712,19 +732,22 @@ class RunIndex:
     ) -> dict[str, str | None] | None:
         """Per-field rendered previews for an OK/CACHED cell.
 
-        One entry per non-internal field the step produced (same hiding and
-        truncation rules as ``_render_preview``), so the data grid can show
-        whichever field the column's field-chip currently selects. ``None``
-        for cells with nothing to render (error/retrying/pending/skipped, or
-        no values at all).
+        One entry per field the step produced (same truncation rules as
+        ``_render_preview``), so the data grid can show whichever field the
+        column's field-chip currently selects. ``None`` for cells with
+        nothing to render (error/retrying/pending/skipped, or no values at
+        all).
+
+        ``__``-internal fields are **included**, unlike ``preview``: the
+        snapshot's ``steps[].fields`` already names them, and the UI's "show
+        internal fields" toggle cycles the field-chip onto them (accrue-ui#25)
+        — a map that omitted them rendered those cells blank. Hiding is the
+        client's decision, and this is a loopback-only server serving a log
+        the user already owns; there is nothing here to withhold from them.
         """
         if state not in (OK, CACHED) or not values:
             return None
-        return {
-            key: RunIndex._render_value(value)
-            for key, value in values.items()
-            if not key.startswith("__")
-        }
+        return {key: RunIndex._render_value(value) for key, value in values.items()}
 
     # -------------------------------------------------------------- snapshot
 
@@ -1199,11 +1222,13 @@ class RunIndex:
                 cell = s.cells.get(r)
                 cells[s.name] = {
                     "v": cell.preview if cell else None,
-                    # Field -> rendered value, all of the step's produced
-                    # (non-internal) fields — what lets the data grid's
+                    # Field -> rendered value, every field the step produced,
+                    # internal ones included — what lets the data grid's
                     # field-chip cycle the actually-rendered value, not just
-                    # the column label (accrue-ui#23). "v" above is kept for
-                    # back-compat; it is this map's first entry.
+                    # the column label (accrue-ui#23), and what the "show
+                    # internal fields" toggle needs to render at all
+                    # (accrue-ui#25). "v" above is kept for back-compat; it
+                    # is this map's first non-internal entry.
                     "f": cell.preview_fields if cell else None,
                     "s": self._cells[base + j],
                 }
@@ -1546,6 +1571,10 @@ def scan_runs(directory: str | Path) -> list[dict[str, Any]]:
     if not directory.is_dir():
         return runs
     for path in directory.glob("*.jsonl"):
+        # `<run>.prompts.jsonl` capture sidecars live right beside their run
+        # log and match the glob; they are not runs (accrue-ui#27).
+        if is_sidecar(path):
+            continue
         try:
             st = path.stat()
         except OSError:

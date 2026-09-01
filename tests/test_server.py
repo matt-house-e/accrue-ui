@@ -263,18 +263,15 @@ def test_values_previews_hide_internal_fields(feature_log: Path):
     rows = {r["row"]: r for r in body["rows"]}
     # Key comes from display_key ("domain") found in fetch outputs.
     assert rows[0]["key"] == "site0.com"
-    # Preview = first NON-__ field; __web_context must never leak here.
-    assert rows[0]["cells"]["fetch"] == {
-        "v": "site0.com",
-        "f": {"domain": "site0.com", "summary": "summary 0"},
-        "s": OK,
-    }
+    # Preview = first NON-__ field; __web_context must never leak into "v".
+    assert rows[0]["cells"]["fetch"]["v"] == "site0.com"
+    assert rows[0]["cells"]["fetch"]["s"] == OK
     assert rows[2]["cells"]["fetch"]["s"] == CACHED
     # Long values truncate to 160 chars with an ellipsis.
     probe_preview = rows[0]["cells"]["probe"]["v"]
     assert len(probe_preview) == 160
     assert probe_preview.endswith("…")
-    # "f" carries every non-internal field, each truncated the same way.
+    # "f" carries every field, each truncated the same way.
     probe_f = rows[0]["cells"]["probe"]["f"]["long"]
     assert probe_f == probe_preview
     # Non-string values render as JSON.
@@ -283,6 +280,31 @@ def test_values_previews_hide_internal_fields(feature_log: Path):
         "f": {"enriched": "true"},
         "s": OK,
     }
+
+
+def test_values_field_map_includes_internal_fields(feature_log: Path):
+    """`f` must carry `__`-internal fields, because the UI can ask for them.
+
+    ``steps[].fields`` names ``__web_context``, and with "show internal
+    fields" on the data grid's field-chip cycles onto it. A field map that
+    dropped internal fields left those cells rendering blank (accrue-ui#25),
+    so every name in ``steps[].fields`` has to be a key of ``f``.
+    """
+    with client_for(feature_log) as client:
+        run = client.get("/api/run").json()
+        body = client.get("/api/values?start=0&count=1").json()
+    fetch_fields = next(s for s in run["steps"] if s["name"] == "fetch")["fields"]
+    assert "__web_context" in fetch_fields  # the toggle has something to show
+    cell = body["rows"][0]["cells"]["fetch"]
+    assert cell["f"] == {
+        "__web_context": "internal context 0",
+        "domain": "site0.com",
+        "summary": "summary 0",
+    }
+    # Every advertised field is selectable: no chip choice renders blank.
+    assert set(fetch_fields) <= set(cell["f"])
+    # Hiding stays the client's job — "v" is still the first non-internal.
+    assert cell["v"] == "site0.com"
 
 
 def test_values_field_map_null_for_errored_cell(feature_log: Path):
@@ -432,6 +454,28 @@ def test_interrupted_old_run_is_not_live(tmp_path: Path):
     # elapsed is the log's own span (last t), not now-minus-started_at.
     assert run["elapsed_s"] == pytest.approx(55.0)
     assert runs[0]["live"] is False
+
+
+def test_runs_listing_skips_capture_sidecars(tmp_path: Path):
+    """`<run>.prompts.jsonl` is a sidecar of a run, not a run (accrue-ui#27).
+
+    It matches the `*.jsonl` discovery glob and sits in the same directory,
+    so the picker used to offer a bogus "live.prompts" entry beside "live" —
+    and selecting it would load a file holding no run records at all.
+    """
+    log = tmp_path / "live.jsonl"
+    write_log(log, _feature_records())
+    age_file(log)
+    # A capture sidecar: prompt bodies, no run records, same directory.
+    sidecar = tmp_path / "live.prompts.jsonl"
+    write_log(sidecar, [{"messages": [], "response": "body", "parsed": None}])
+    age_file(sidecar, seconds=1.0)  # newer than the log, as in a real run
+
+    with client_for(log) as client:
+        runs = client.get("/api/runs").json()["runs"]
+
+    assert [r["name"] for r in runs] == ["live"]
+    assert not any(r["path"].endswith(".prompts.jsonl") for r in runs)
 
 
 def test_bogus_row_index_is_ignored(tmp_path: Path):

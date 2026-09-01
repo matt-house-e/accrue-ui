@@ -150,6 +150,29 @@ def test_newest_log_discovered(
     assert captured["log"].name == "newer.jsonl"
 
 
+def test_newest_log_discovery_skips_capture_sidecars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured: dict
+):
+    """A `<run>.prompts.jsonl` sidecar is never the log to serve (accrue-ui#27).
+
+    It matches the same glob and is written alongside the run, so it is
+    routinely the newest `*.jsonl` in the directory — picking it would serve
+    prompt bodies as if they were a run log.
+    """
+    monkeypatch.chdir(tmp_path)
+    runs = tmp_path / ".accrue" / "runs"
+    runs.mkdir(parents=True)
+    log = runs / "live.jsonl"
+    _write_small_log(log)
+    sidecar = runs / "live.prompts.jsonl"
+    sidecar.write_text('{"messages": [], "response": "body"}\n')
+    past = time.time() - 3600
+    os.utime(log, (past, past))  # the sidecar is the newer file
+
+    assert cli.main(["--no-browser"]) == 0
+    assert captured["log"].name == "live.jsonl"
+
+
 def test_no_log_anywhere_exits_1_with_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured: dict, capsys
 ):
