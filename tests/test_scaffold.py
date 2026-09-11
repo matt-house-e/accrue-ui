@@ -7,7 +7,7 @@ import accrue_ui
 
 
 def test_version():
-    assert accrue_ui.__version__ == "0.1.0.dev0"
+    assert accrue_ui.__version__ == "0.1.0"
 
 
 def test_cli_version_exits_zero():

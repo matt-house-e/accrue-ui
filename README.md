@@ -5,8 +5,37 @@ enrichment pipelines: watch a run live cell-by-cell, inspect any cell's prompt
 and response, triage failures, and track cost — all from the JSONL run log
 accrue emits.
 
-**Status: under construction** — built issue-by-issue, see
+**Status: early release.** 0.1.0 is the first published version; the dashboard
+is built issue-by-issue, so expect gaps — see
 [the issues](https://github.com/matt-house-e/accrue-ui/issues).
+
+## Install
+
+```bash
+pip install accrue-ui
+```
+
+Then point it at a run log:
+
+```bash
+accrue-ui .accrue/runs/2026-08-20a.jsonl
+```
+
+accrue 1.4 and later ship an `accrue watch` handoff that opens the same
+dashboard:
+
+```bash
+accrue watch .accrue/runs/2026-08-20a.jsonl
+```
+
+From accrue 1.4.1 there is a one-line form that installs both:
+
+```bash
+pip install 'accrue[ui]'
+```
+
+Requires Python 3.10+ and a run log — write one with
+`pipeline.run(..., run_log=True)`.
 
 ## Retrying failed rows
 
