@@ -267,7 +267,7 @@ def test_cell_fixture_shape():
     assert doc["row"] == 1284
     assert doc["status"] == "error"
     assert set(doc["error"]) == {"type", "msg"}
-    assert set(doc["usage"]) == {"in", "out", "cost"}
+    assert set(doc["usage"]) == {"in", "out", "cache_read", "cache_write", "cost"}
     assert len(doc["attempts"]) == 3
     for attempt in doc["attempts"]:
         assert set(attempt) == {"n", "kind", "at", "latency_ms", "status", "backoff_s"}

@@ -216,12 +216,13 @@ def test_cost_aggregation_and_invariants(feature_log: Path):
     # Contract invariants.
     assert stats["spend"] == pytest.approx(sum(cost["by_step"].values()))
     assert stats["spend"] == pytest.approx(sum(cost["by_model"].values()))
-    # Tokens count unknown-model and batch (step_end) usage too.
+    # Tokens count unknown-model and batch (step_end) usage too. The log's
+    # usage objects have no cache keys, so cache tokens are unknown, not 0.
     assert cost["tokens"] == {
         "input": 18000 + 40000 + 100000,
         "output": 1800 + 4000 + 10000,
-        "cache_read": 0,
-        "cache_write": 0,
+        "cache_read": None,
+        "cache_write": None,
     }
     assert cost["wasted"] == pytest.approx(FETCH_ROW_USD * len(ERROR_ROWS))
     assert cost["batch_saved"] == pytest.approx(ENRICH_USD)  # 50% discount
@@ -230,6 +231,143 @@ def test_cost_aggregation_and_invariants(feature_log: Path):
     assert stats["errors"] == len(ERROR_ROWS)
     assert stats["eta_s"] == 0.0
     assert body["rows"] == {"total": NROWS, "done": NROWS}
+
+
+# A log written by accrue >= 1.5.1, whose usage objects carry prompt-cache
+# tokens (accrue#169). "draft" reports per row; "bulk" is batch and reports
+# only on step_end.
+CACHE_ROW_USAGE = {
+    "in": 1000,
+    "out": 100,
+    "cache_read_tokens": 50_000,
+    "cache_write_tokens": 2_000,
+    "cost": None,
+}
+# claude-sonnet-4-6: 1000*3.00 + 100*15.00 + 50_000*0.30 + 2_000*3.75, per 1M.
+CACHE_ROW_USD = 0.027
+# claude-haiku-4-5 at 50% batch: 100_000*1.00 + 10_000*5.00 + 400_000*0.10
+# + 20_000*1.25, per 1M, halved.
+CACHE_BULK_USD = 0.1075
+
+
+def _cache_records() -> list[dict]:
+    records = [
+        {
+            "v": 1,
+            "t": 0.0,
+            "type": "pipeline_start",
+            "run_id": "2026-10-13-cache",
+            "started_at": "2026-10-13T10:00:00+00:00",
+            "num_rows": 4,
+            "steps": [
+                {
+                    "name": "draft",
+                    "level": 0,
+                    "mode": "realtime",
+                    "model": "claude-sonnet-4-6",
+                },
+                {
+                    "name": "bulk",
+                    "level": 1,
+                    "mode": "batch",
+                    "model": "claude-haiku-4-5",
+                },
+            ],
+            "plan": None,
+        },
+    ]
+    for r in range(4):
+        records.append(row("draft", r, 1.0 + r, usage=dict(CACHE_ROW_USAGE)))
+    records.append(
+        {
+            "v": 1,
+            "t": 5.0,
+            "type": "step_end",
+            "step": "draft",
+            "num_errors": 0,
+            # The step aggregate repeats the rows; it must not count twice.
+            "usage": {
+                "in": 4000,
+                "out": 400,
+                "cache_read_tokens": 200_000,
+                "cache_write_tokens": 8_000,
+                "cost": None,
+            },
+            "elapsed_s": 4.0,
+            "batch_id": None,
+        }
+    )
+    for r in range(4):
+        records.append(row("bulk", r, 6.0 + r, values={"ok": True}, usage=None))
+    records.append(
+        {
+            "v": 1,
+            "t": 10.0,
+            "type": "step_end",
+            "step": "bulk",
+            "num_errors": 0,
+            "usage": {
+                "in": 100_000,
+                "out": 10_000,
+                "cache_read_tokens": 400_000,
+                "cache_write_tokens": 20_000,
+                "cost": None,
+            },
+            "elapsed_s": 4.0,
+            "batch_id": "batch_cache",
+        }
+    )
+    return records
+
+
+def test_cache_tokens_are_counted_and_priced(tmp_path: Path):
+    path = tmp_path / "cache.jsonl"
+    write_log(path, _cache_records())
+    age_file(path)
+    with client_for(path) as client:
+        body = client.get("/api/run").json()
+        detail = client.get("/api/cell/draft/0").json()
+    cost = body["cost"]
+    assert cost["tokens"] == {
+        "input": 4 * 1000 + 100_000,
+        "output": 4 * 100 + 10_000,
+        "cache_read": 4 * 50_000 + 400_000,
+        "cache_write": 4 * 2_000 + 20_000,
+    }
+    assert cost["by_step"] == {
+        "draft": pytest.approx(4 * CACHE_ROW_USD),
+        "bulk": pytest.approx(CACHE_BULK_USD),
+    }
+    assert body["stats"]["spend"] == pytest.approx(4 * CACHE_ROW_USD + CACHE_BULK_USD)
+    # The batch discount covers the cache tokens too.
+    assert cost["batch_saved"] == pytest.approx(CACHE_BULK_USD)
+    assert detail["usage"] == {
+        "in": 1000,
+        "out": 100,
+        "cache_read": 50_000,
+        "cache_write": 2_000,
+        "cost": pytest.approx(CACHE_ROW_USD),
+    }
+
+
+def test_recorded_zero_cache_tokens_stay_zero(tmp_path: Path):
+    """Keys present at 0 (an OpenAI run, or no cache hit) is a real 0."""
+    usage = {
+        "in": 10,
+        "out": 2,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost": None,
+    }
+    path = tmp_path / "zero.jsonl"
+    write_log(path, [row("s", 0, 1.0, usage=usage)])
+    age_file(path)
+    with client_for(path) as client:
+        tokens = client.get("/api/run").json()["cost"]["tokens"]
+        detail = client.get("/api/cell/s/0").json()
+    assert tokens["cache_read"] == 0
+    assert tokens["cache_write"] == 0
+    assert detail["usage"]["cache_read"] == 0
 
 
 def test_steps_modes_and_fields(feature_log: Path):
@@ -324,7 +462,13 @@ def test_cell_detail_full_values_include_internal(feature_log: Path):
     # __-prefixed keys are hidden from previews but PRESENT in full values.
     assert detail["values"]["__web_context"] == "internal context 0"
     assert detail["values"]["domain"] == "site0.com"
-    assert detail["usage"] == {"in": 1000, "out": 100, "cost": pytest.approx(0.0045)}
+    assert detail["usage"] == {
+        "in": 1000,
+        "out": 100,
+        "cache_read": None,  # this log predates the cache-token fields
+        "cache_write": None,
+        "cost": pytest.approx(0.0045),
+    }
     assert detail["attempts"][0]["kind"] == "live"
     assert detail["key"] == "site0.com"
 

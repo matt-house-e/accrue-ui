@@ -130,7 +130,7 @@ def price_usd(
     """Dollar cost for a token count, or ``None`` when the model is unknown.
 
     ``cache_read``/``cache_write`` are prompt-cache token counts, each at its
-    own rate; schema v1 usage carries none, so the index never passes them.
+    own rate, on top of ``tokens_in`` (the run log keeps them disjoint).
     ``batch=True`` applies the 50% batch-API discount.
     """
     price = lookup(model, prices)

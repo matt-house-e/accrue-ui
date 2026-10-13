@@ -144,7 +144,12 @@ class StepState:
     # --- cost tallies -----------------------------------------------------
     row_in: int = 0
     row_out: int = 0
+    row_cache_read: int = 0
+    row_cache_write: int = 0
     row_usage_seen: bool = False
+    #: Some row usage carried the cache-token keys (accrue#169). Logs written
+    #: before them omit the keys entirely, which is not the same as 0.
+    row_cache_seen: bool = False
     row_cost: float | None = None  # priced dollars summed over rows
     wasted: float = 0.0  # priced dollars on rows that ended in error
     batch_saved: float = 0.0
@@ -153,6 +158,9 @@ class StepState:
     priced_ok_count: int = 0
     end_in: int = 0
     end_out: int = 0
+    end_cache_read: int = 0
+    end_cache_write: int = 0
+    end_cache_seen: bool = False
     end_cost: float | None = None  # priced dollars from step_end aggregate
     ended: bool = False
     # --- timing (P21) -----------------------------------------------------
@@ -184,6 +192,20 @@ class StepState:
         if self.row_usage_seen:
             return self.row_in, self.row_out
         return self.end_in, self.end_out
+
+    def effective_cache(self) -> tuple[int, int] | None:
+        """Cache (read, write) tokens from the same source as the tokens.
+
+        ``None`` when that source never carried the cache keys: the log
+        predates them, so the counts are unknown rather than zero.
+        """
+        if self.row_usage_seen:
+            if not self.row_cache_seen:
+                return None
+            return self.row_cache_read, self.row_cache_write
+        if not self.end_cache_seen:
+            return None
+        return self.end_cache_read, self.end_cache_write
 
     def effective_cost(self) -> float | None:
         if self.row_usage_seen:
@@ -657,21 +679,34 @@ class RunIndex:
         if usage is not None:
             tokens_in = usage.get("in") if isinstance(usage.get("in"), int) else 0
             tokens_out = usage.get("out") if isinstance(usage.get("out"), int) else 0
+            cache = _cache_tokens(usage)
             step.row_usage_seen = True
             step.row_in += tokens_in
             step.row_out += tokens_out
+            if cache is not None:
+                step.row_cache_seen = True
+                step.row_cache_read += cache[0]
+                step.row_cache_write += cache[1]
+            cache_read, cache_write = cache or (0, 0)
             usd = usage.get("cost")
             if not isinstance(usd, (int, float)):
                 usd = price_usd(
                     step.model,
                     tokens_in,
                     tokens_out,
+                    cache_read=cache_read,
+                    cache_write=cache_write,
                     batch=step.is_batch,
                     prices=self.prices,
                 )
                 if usd is not None and step.is_batch:
                     full = price_usd(
-                        step.model, tokens_in, tokens_out, prices=self.prices
+                        step.model,
+                        tokens_in,
+                        tokens_out,
+                        cache_read=cache_read,
+                        cache_write=cache_write,
+                        prices=self.prices,
                     )
                     step.batch_saved += (full or 0.0) - usd
             if usd is not None:
@@ -742,22 +777,35 @@ class RunIndex:
         if isinstance(usage, dict):
             tokens_in = usage.get("in") if isinstance(usage.get("in"), int) else 0
             tokens_out = usage.get("out") if isinstance(usage.get("out"), int) else 0
+            cache = _cache_tokens(usage)
             # Accumulate: a step_end arrives once per segment, so a retry adds
             # what it spent rather than replacing the run's aggregate.
             step.end_in += tokens_in
             step.end_out += tokens_out
+            if cache is not None:
+                step.end_cache_seen = True
+                step.end_cache_read += cache[0]
+                step.end_cache_write += cache[1]
+            cache_read, cache_write = cache or (0, 0)
             usd = usage.get("cost")
             if not isinstance(usd, (int, float)):
                 usd = price_usd(
                     step.model,
                     tokens_in,
                     tokens_out,
+                    cache_read=cache_read,
+                    cache_write=cache_write,
                     batch=step.is_batch,
                     prices=self.prices,
                 )
                 if usd is not None and step.is_batch and not step.row_usage_seen:
                     full = price_usd(
-                        step.model, tokens_in, tokens_out, prices=self.prices
+                        step.model,
+                        tokens_in,
+                        tokens_out,
+                        cache_read=cache_read,
+                        cache_write=cache_write,
+                        prices=self.prices,
                     )
                     step.batch_saved += (full or 0.0) - usd
             if usd is not None:
@@ -1273,6 +1321,10 @@ class RunIndex:
         by_step: dict[str, float] = {}
         by_model: dict[str, float] = {}
         tokens_in = tokens_out = 0
+        # None until some step's usage carries the cache keys: a log written
+        # before accrue#169 has no cache counts, and 0 would be a claim.
+        cache_read: int | None = None
+        cache_write: int | None = None
         wasted = 0.0
         batch_saved = 0.0
         cache_saved = 0.0
@@ -1283,8 +1335,13 @@ class RunIndex:
             eff_in, eff_out = s.effective_tokens()
             tokens_in += eff_in
             tokens_out += eff_out
+            eff_cache = s.effective_cache()
+            if eff_cache is not None:
+                cache_read = (cache_read or 0) + eff_cache[0]
+                cache_write = (cache_write or 0) + eff_cache[1]
             usd = s.effective_cost()
-            if usd is None and s.model and (eff_in or eff_out):
+            spent = eff_in or eff_out or (eff_cache is not None and any(eff_cache))
+            if usd is None and s.model and spent:
                 # Spent tokens on a model the table has no price for: name it,
                 # so the UI can say which price is missing instead of "—".
                 unpriced.add(s.model)
@@ -1308,9 +1365,8 @@ class RunIndex:
             "tokens": {
                 "input": tokens_in,
                 "output": tokens_out,
-                # v1 usage objects carry no cache token counts.
-                "cache_read": 0,
-                "cache_write": 0,
+                "cache_read": cache_read,
+                "cache_write": cache_write,
             },
             "wasted": round(wasted, 6) if priced_any else None,
             "batch_saved": round(batch_saved, 6) if priced_any else None,
@@ -1369,9 +1425,12 @@ class RunIndex:
             if cost is None:
                 raw_cost = cell.usage.get("cost")
                 cost = raw_cost if isinstance(raw_cost, (int, float)) else None
+            cache = _cache_tokens(cell.usage)
             usage = {
                 "in": cell.usage.get("in"),
                 "out": cell.usage.get("out"),
+                "cache_read": cache[0] if cache is not None else None,
+                "cache_write": cache[1] if cache is not None else None,
                 "cost": round(cost, 6) if cost is not None else None,
             }
 
@@ -1727,6 +1786,23 @@ def _normalise_message(msg: str) -> str:
     msg = _ID_RE.sub("#", msg)
     msg = _NUMBER_RE.sub("#", msg)
     return _SPACE_RE.sub(" ", msg).strip()[:GROUP_KEY_MAX_CHARS]
+
+
+def _cache_tokens(usage: dict[str, Any]) -> tuple[int, int] | None:
+    """A usage object's prompt-cache (read, write) tokens, or None if absent.
+
+    accrue#169 added ``cache_read_tokens``/``cache_write_tokens`` to every
+    usage object, always as ints, so a missing pair means the log predates
+    them. They are disjoint from ``in``: billed input is in + read + write.
+    """
+    if "cache_read_tokens" not in usage and "cache_write_tokens" not in usage:
+        return None
+    read = usage.get("cache_read_tokens")
+    write = usage.get("cache_write_tokens")
+    return (
+        read if isinstance(read, int) else 0,
+        write if isinstance(write, int) else 0,
+    )
 
 
 def _group_key(step: str, error: dict[str, Any] | None) -> tuple[str, str, str]:
