@@ -97,6 +97,7 @@ def test_first_drain_primes_stats_then_none():
         "throughput_per_min",
         "eta_s",
         "cache_saved",
+        "unpriced",
         "rows_done",  # delta-only mirror of the snapshot's rows.done
         "live",  # delta-only mirror of run.live (mtime recency)
     }

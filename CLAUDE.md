@@ -14,7 +14,7 @@ derived from the log (plus the small retry surface below).
 pip install -e ".[dev]"   # Dev install
 pytest                    # Run tests
 ruff check .              # Lint (CI enforces both)
-accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--port 7607] [--no-browser]
+accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--prices file.toml] [--port 7607] [--no-browser]
 ```
 
 `--pipeline` names either a `Pipeline` (then `--data` is required: a
@@ -23,6 +23,9 @@ zero-arg callable returning `(pipeline, data)` — optionally
 `(pipeline, data, config)` when the run used a custom `EnrichmentConfig`.
 Launch from the directory the run itself used, so the retry finds the same
 checkpoint.
+
+`--prices` merges a TOML file of per-model USD/MTok prices over the built-in
+table in `server/pricing.py`; a bad file exits 1 before the port is bound.
 
 ## Architecture
 

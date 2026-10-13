@@ -226,10 +226,14 @@ class RetryController:
         run_path: str | Path,
         pipeline_spec: str | None = None,
         data_spec: str | None = None,
+        *,
+        prices_path: str | Path | None = None,
     ) -> None:
         self.run_path = Path(run_path)
         self.pipeline_spec = pipeline_spec
         self.data_spec = data_spec
+        #: ``--prices`` file, kept only so resume_command reproduces it.
+        self.prices_path = prices_path
         self.last_error: str | None = None
         self._resolved = False
         self._target: _Target | None = None
@@ -273,6 +277,8 @@ class RetryController:
         parts = ["accrue-ui", shlex.quote(str(self.run_path)), "--pipeline", spec]
         if self.data_spec:
             parts += ["--data", shlex.quote(self.data_spec)]
+        if self.prices_path:
+            parts += ["--prices", shlex.quote(str(self.prices_path))]
         return " ".join(parts)
 
     def block(self) -> dict[str, Any]:

@@ -23,7 +23,7 @@ ERROR_ROWS = list(range(5, 17))  # 12 errors -> burst hint fires
 CACHED_ROWS = [2, 3]
 OK_ROWS = [0, 1, 4, 17, 18, 19]
 
-# Per-row fetch cost on claude-sonnet-5: (1000*3.00 + 100*15.00) / 1e6.
+# Per-row fetch cost on claude-sonnet-4-6: (1000*3.00 + 100*15.00) / 1e6.
 FETCH_ROW_USD = 0.0045
 FETCH_USD = FETCH_ROW_USD * (len(OK_ROWS) + len(ERROR_ROWS))  # 0.081
 # enrich is batch on claude-haiku-4-5: (100_000*1.00 + 10_000*5.00)/1e6 * 0.5.
@@ -55,7 +55,7 @@ def _feature_records() -> list[dict]:
                     "name": "fetch",
                     "level": 0,
                     "mode": "realtime",
-                    "model": "claude-sonnet-5",
+                    "model": "claude-sonnet-4-6",
                 },
                 {"name": "probe", "level": 0, "mode": "realtime", "model": "mystery-9"},
                 {
@@ -210,7 +210,7 @@ def test_cost_aggregation_and_invariants(feature_log: Path):
         "enrich": pytest.approx(ENRICH_USD),
     }
     assert cost["by_model"] == {
-        "claude-sonnet-5": pytest.approx(FETCH_USD),
+        "claude-sonnet-4-6": pytest.approx(FETCH_USD),
         "claude-haiku-4-5": pytest.approx(ENRICH_USD),
     }
     # Contract invariants.

@@ -31,12 +31,13 @@ import json
 import os
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .pricing import price_usd
+from .pricing import PRICES, ModelPrice, price_usd
 from .retry import RetryController
 from .tail import TailRecord
 
@@ -201,8 +202,15 @@ class ErrorGroup:
 class RunIndex:
     """Snapshot state for one run log; feed it records via :meth:`apply`."""
 
-    def __init__(self, path: str | Path, retry: RetryController | None = None):
+    def __init__(
+        self,
+        path: str | Path,
+        retry: RetryController | None = None,
+        prices: Mapping[str, ModelPrice] | None = None,
+    ):
         self.path = Path(path)
+        #: Model -> price; the built-in table unless ``--prices`` changed it.
+        self.prices = prices if prices is not None else PRICES
         #: Prompt sidecar beside the run log — ``<run>.prompts.jsonl``. Present
         #: only when the run captured bodies (``capture="prompts"``/``"full"``);
         #: ``/api/cell`` seeks into it by offset and never reads it whole.
@@ -604,9 +612,17 @@ class RunIndex:
             step.row_out += tokens_out
             usd = usage.get("cost")
             if not isinstance(usd, (int, float)):
-                usd = price_usd(step.model, tokens_in, tokens_out, batch=step.is_batch)
+                usd = price_usd(
+                    step.model,
+                    tokens_in,
+                    tokens_out,
+                    batch=step.is_batch,
+                    prices=self.prices,
+                )
                 if usd is not None and step.is_batch:
-                    full = price_usd(step.model, tokens_in, tokens_out)
+                    full = price_usd(
+                        step.model, tokens_in, tokens_out, prices=self.prices
+                    )
                     step.batch_saved += (full or 0.0) - usd
             if usd is not None:
                 cell.cost_usd = float(usd)
@@ -674,9 +690,17 @@ class RunIndex:
             step.end_out += tokens_out
             usd = usage.get("cost")
             if not isinstance(usd, (int, float)):
-                usd = price_usd(step.model, tokens_in, tokens_out, batch=step.is_batch)
+                usd = price_usd(
+                    step.model,
+                    tokens_in,
+                    tokens_out,
+                    batch=step.is_batch,
+                    prices=self.prices,
+                )
                 if usd is not None and step.is_batch and not step.row_usage_seen:
-                    full = price_usd(step.model, tokens_in, tokens_out)
+                    full = price_usd(
+                        step.model, tokens_in, tokens_out, prices=self.prices
+                    )
                     step.batch_saved += (full or 0.0) - usd
             if usd is not None:
                 step.end_cost = (step.end_cost or 0.0) + float(usd)
@@ -812,6 +836,9 @@ class RunIndex:
             "throughput_per_min": throughput,
             "eta_s": eta_s,
             "cache_saved": cost["_cache_saved"],
+            # Here rather than in "cost" so it rides SSE deltas: the Spend
+            # tile names the missing price live, without a snapshot refetch.
+            "unpriced": cost["_unpriced"],
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -819,7 +846,7 @@ class RunIndex:
         cells = self._cells
         cost = self._cost_block()
         stats = self._stats_block(cost)
-        del cost["_spend"], cost["_cache_saved"]
+        del cost["_spend"], cost["_cache_saved"], cost["_unpriced"]
 
         return {
             "run": self.run_meta(),
@@ -1165,12 +1192,17 @@ class RunIndex:
         batch_saved = 0.0
         cache_saved = 0.0
         priced_any = False
+        unpriced: set[str] = set()
 
         for s in self._steps:
             eff_in, eff_out = s.effective_tokens()
             tokens_in += eff_in
             tokens_out += eff_out
             usd = s.effective_cost()
+            if usd is None and s.model and (eff_in or eff_out):
+                # Spent tokens on a model the table has no price for: name it,
+                # so the UI can say which price is missing instead of "—".
+                unpriced.add(s.model)
             if usd is not None:
                 priced_any = True
                 by_step[s.name] = round(usd, 6)
@@ -1199,6 +1231,7 @@ class RunIndex:
             "batch_saved": round(batch_saved, 6) if priced_any else None,
             "_spend": spend,
             "_cache_saved": round(cache_saved, 6) if priced_any else None,
+            "_unpriced": sorted(unpriced),
         }
 
     # ---------------------------------------------------------------- values

@@ -286,6 +286,15 @@ def test_resume_command_forms():
     )
 
 
+def test_resume_command_carries_the_prices_file():
+    controller = RetryController(
+        "run.jsonl", "enrich:pipe", prices_path="my prices.toml"
+    )
+    assert controller.resume_command == (
+        "accrue-ui run.jsonl --pipeline enrich:pipe --prices 'my prices.toml'"
+    )
+
+
 def test_resume_command_quotes_awkward_paths():
     command = RetryController("my runs/a.jsonl", "enrich:pipe").resume_command
     assert command == "accrue-ui 'my runs/a.jsonl' --pipeline enrich:pipe"

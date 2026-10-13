@@ -1,10 +1,10 @@
 """Command-line entry point for accrue-ui.
 
-``accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--port 7607]
-[--no-browser]`` resolves the run log (explicit path, else the newest
-``*.jsonl`` under ``./.accrue/runs``, capture sidecars skipped), generates a
-fresh URL-safe launch token, builds the server app, **binds the loopback
-port**, and only then
+``accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr]
+[--prices file.toml] [--port 7607] [--no-browser]`` resolves the run log
+(explicit path, else the newest ``*.jsonl`` under ``./.accrue/runs``,
+capture sidecars skipped), generates a fresh URL-safe launch token, builds
+the server app, **binds the loopback port**, and only then
 prints the tokenized URL and opens the browser — uvicorn serves on the
 socket already in hand, bound to **127.0.0.1 only**, hardcoded, no flag to
 widen it (see ``server/security.py`` for the threat model).
@@ -34,6 +34,7 @@ from fastapi import FastAPI
 from . import __version__
 from .server.app import create_app
 from .server.index import is_sidecar
+from .server.pricing import PricesError
 
 #: Loopback only, on purpose. There is deliberately no --host flag.
 HOST = "127.0.0.1"
@@ -67,6 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Import path (module:attr) to the run's input rows — a DataFrame, "
             "a list of dicts, or a zero-arg callable returning one. Required "
             "when --pipeline names a Pipeline instance."
+        ),
+    )
+    parser.add_argument(
+        "--prices",
+        default=None,
+        metavar="FILE.toml",
+        help=(
+            "TOML file of per-model prices (USD per 1M tokens) that add to or "
+            "override the built-in table, e.g. "
+            '["claude-sonnet-4-6"] input = 3.0, output = 15.0.'
         ),
     )
     parser.add_argument(
@@ -154,13 +165,20 @@ def main(argv: list[str] | None = None) -> int:
     token = secrets.token_urlsafe(32)
     # The specs are imported during app startup, not here: a bad --pipeline
     # is reported in the UI (retry.reason) rather than killing the server.
-    app = create_app(
-        run_log,
-        token=token,
-        port=args.port,
-        pipeline=args.pipeline,
-        data=args.data,
-    )
+    # A bad --prices file does stop it — before the port is bound — since
+    # every dollar figure would otherwise come from the wrong table.
+    try:
+        app = create_app(
+            run_log,
+            token=token,
+            port=args.port,
+            pipeline=args.pipeline,
+            data=args.data,
+            prices=args.prices,
+        )
+    except PricesError as exc:
+        print(f"accrue-ui: --prices: {exc}", file=sys.stderr)
+        return 1
 
     # Bind BEFORE the token is printed or opened — see bind_loopback().
     try:

@@ -440,9 +440,28 @@ def test_nullable_money_renders_as_an_em_dash():
     assert "value ?? DASH" in cost
     assert "if (value == null) return null;" not in cost  # tiles are kept
     app_js = (STATIC / "app.js").read_text()
-    assert "fmtMoney(stats.spend) ?? DASH" in app_js
+    assert "fmtMoney(stats.spend) ?? unpricedValue(unpriced) ?? DASH" in app_js
     css = (STATIC / "style.css").read_text()
     assert ".cost-tile .v.dim" in css
+
+
+def test_unpriced_models_are_named_instead_of_dashed():
+    """stats.unpriced: say which model has no price and how to supply one."""
+    fmt = (STATIC / "lib" / "fmt.js").read_text()
+    assert "no price for ${models[0]}" in fmt
+    assert "--prices <file.toml>" in fmt
+    app_js = (STATIC / "app.js").read_text()
+    # The Spend tile falls back to the name before the em-dash.
+    assert "fmtMoney(stats.spend) ?? unpricedValue(unpriced) ?? DASH" in app_js
+    assert "unpricedTip(unpriced)" in app_js
+    cost = (STATIC / "views" / "cost.js").read_text()
+    assert "fmtMoney(actual) ?? fmtUnpriced(unpriced)" in cost
+    # By model lists unpriced models as rows, so a partly-priced run says so.
+    assert 'class="bar-row unpriced"' in cost
+    assert "unpriced=${unpriced}" in cost
+    css = (STATIC / "style.css").read_text()
+    assert ".cost-tile .v.unpriced" in css
+    assert ".stat-value .unpriced" in css
 
 
 def test_run_chip_does_not_repeat_the_id():

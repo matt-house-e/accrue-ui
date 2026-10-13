@@ -2,19 +2,27 @@
 // table, stat tiles, and token counts.
 import { html } from "../lib/html.js";
 import { IconInfo } from "../lib/icons.js";
-import { fmtInt, fmtMoney } from "../lib/fmt.js";
+import { fmtInt, fmtMoney, fmtUnpriced, unpricedTip } from "../lib/fmt.js";
 import { snapshot } from "../lib/store.js";
 
 // Single-hue CSS bars (--jade-9 fill, 14px, rounded right end only), widths
 // proportional to the largest value, mono figure right-aligned. The text row
 // is the data; the bar only ranks it. No chart library — see CLAUDE.md.
-function BarChart({ title, entries }) {
+// *unpriced* models (stats.unpriced) get a "no price" row of their own: a
+// partly-priced run must not read as if its other models cost nothing.
+function BarChart({
+  title,
+  entries,
+  unpriced = [],
+  empty = "Nothing priced in this run.",
+}) {
   const sorted = [...entries].sort((a, b) => b[1] - a[1]);
   const max = Math.max(...sorted.map(([, v]) => v), 0.0001);
   return html`<div class="cost-card">
     <h3>${title}</h3>
     ${sorted.length === 0 &&
-    html`<div class="empty-state">Nothing priced in this run.</div>`}
+    unpriced.length === 0 &&
+    html`<div class="empty-state">${empty}</div>`}
     ${sorted.map(
       ([label, value]) => html`<div class="bar-row" key=${label}>
         <span class="bar-label">${label}</span>
@@ -27,6 +35,18 @@ function BarChart({ title, entries }) {
         <span class="bar-value">${fmtMoney(value) ?? DASH}</span>
       </div>`
     )}
+    ${unpriced.map(
+      (model) => html`<div class="bar-row unpriced" key=${model}>
+        <span class="bar-label">${model}</span>
+        <span class="bar-track"></span>
+        <span class="bar-value">no price</span>
+      </div>`
+    )}
+    ${unpriced.length > 0 &&
+    html`<div class="caveat">
+      ${unpricedTip(unpriced)} Tokens on unpriced models are left out of
+      every dollar figure.
+    </div>`}
   </div>`;
 }
 
@@ -62,6 +82,7 @@ export function Cost() {
   const byModel = Object.entries(cost.by_model || {});
   const actual = snap.stats ? snap.stats.spend : null;
   const cacheSaved = snap.stats ? snap.stats.cache_saved : null;
+  const unpriced = (snap.stats && snap.stats.unpriced) || [];
   const vsPlan = plan && actual != null ? actual - plan.est_total : null;
 
   // Plan table in pipeline order.
@@ -77,8 +98,12 @@ export function Cost() {
 
   return html`<div class="cost">
     <div>
-      <${BarChart} title="Cost by step" entries=${byStep} />
-      <${BarChart} title="By model" entries=${byModel} />
+      <${BarChart}
+        title="Cost by step"
+        entries=${byStep}
+        empty=${unpriced.length ? unpricedTip(unpriced) : undefined}
+      />
+      <${BarChart} title="By model" entries=${byModel} unpriced=${unpriced} />
       ${plan &&
       html`<div class="cost-card">
         <h3>Plan vs actual by step</h3>
@@ -117,7 +142,11 @@ export function Cost() {
           value=${plan ? fmtMoney(plan.est_total) : null}
           tip="Estimated before the run by pipeline.plan() from token counts at list prices."
         />
-        <${Tile} label="Actual" value=${fmtMoney(actual)} />
+        <${Tile}
+          label="Actual"
+          value=${fmtMoney(actual) ?? fmtUnpriced(unpriced)}
+          tone=${actual == null ? "unpriced" : ""}
+        />
         <${Tile}
           label="Vs plan"
           value=${vsPlan != null ? fmtMoney(vsPlan) : null}

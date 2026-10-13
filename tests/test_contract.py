@@ -76,6 +76,7 @@ def test_stats_and_cost_with_no_pricing(golden_log: Path):
     stats = body["stats"]
     assert stats["spend"] is None
     assert stats["cache_saved"] is None
+    assert stats["unpriced"] == []  # no model, no tokens: nothing to price
     assert stats["errors"] == 1
     assert stats["cache_hit_rate"] == 0.0
     assert stats["eta_s"] == 0.0  # finished run

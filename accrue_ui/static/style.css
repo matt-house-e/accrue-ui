@@ -1047,6 +1047,17 @@ button:disabled { cursor: not-allowed; }
 .cost-tile .v.red { color: var(--error-text); }
 /* Em-dash for a figure this run cannot supply: present, but not a number. */
 .cost-tile .v.dim { color: var(--faint-2); }
+/* "no price for <model>" where a dollar figure would be (stats.unpriced):
+   smaller than a figure, and allowed to wrap so a long model id fits. */
+.stat-value .unpriced,
+.cost-tile .v.unpriced {
+  display: block;
+  font: 500 12px/1.4 var(--font-mono);
+  color: var(--muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.bar-row.unpriced .bar-value { color: var(--faint-2); }
 .token-rows { display: flex; flex-direction: column; gap: 8px; }
 .token-row {
   display: flex;

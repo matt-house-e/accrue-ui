@@ -56,6 +56,35 @@ Run it from the same directory the pipeline ran in, so the retry resolves
 the same checkpoint. Without `--pipeline` the buttons stay disabled and say
 why.
 
+## Prices
+
+accrue's run log records tokens but no dollars, so the dashboard prices them
+from a built-in table of list prices: current Claude models at Anthropic's
+API rates, plus a few others. If a model isn't in the table, the dashboard
+shows "no price for <model>" where the figure would go. To supply a price,
+or to override one (a negotiated rate, a gateway markup), pass a TOML file
+of USD per 1M tokens:
+
+```toml
+# prices.toml — quote each model id
+["claude-sonnet-4-6"]
+input = 3.00
+output = 15.00
+cache_read = 0.30    # optional
+cache_write = 3.75   # optional; 5-minute cache writes
+
+["house-llm-2"]      # not built in: input and output are required
+input = 0.80
+output = 3.20
+```
+
+```bash
+accrue-ui .accrue/runs/2026-08-20a.jsonl --prices prices.toml
+```
+
+A field you leave out keeps its built-in value. If a file can't be used,
+accrue-ui exits before it starts serving and says what is wrong.
+
 ## Development
 
 ```bash

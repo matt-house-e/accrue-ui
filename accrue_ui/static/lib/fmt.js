@@ -13,6 +13,21 @@ export function fmtMoney(n) {
   return `${n < 0 ? "−" : ""}$${s}`;
 }
 
+// Models that spent tokens but have no price (stats.unpriced): name them
+// rather than show an em-dash, so the reader knows which price is missing
+// and how to supply it. "no price for claude-x" / "... +2 more".
+export const PRICES_HINT = "supply one with --prices <file.toml>";
+
+export function fmtUnpriced(models) {
+  if (!models || models.length === 0) return null;
+  const more = models.length > 1 ? ` +${models.length - 1} more` : "";
+  return `no price for ${models[0]}${more}`;
+}
+
+export function unpricedTip(models) {
+  return `No price for ${models.join(", ")} — ${PRICES_HINT}.`;
+}
+
 export function fmtPct(x) {
   if (x == null) return null;
   return `${Math.round(x * 100)}%`;
