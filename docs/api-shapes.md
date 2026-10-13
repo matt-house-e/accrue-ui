@@ -9,6 +9,25 @@ same-origin (`/api/*`), JSON unless noted. Timestamps are ISO 8601 UTC
 strings (`2026-08-17T09:41:02Z`). Money is USD as a JSON number. Reference
 fixtures live in `tests/fixtures/api/` and conform to these shapes exactly.
 
+## Several runs in one log file — `?run=<id>`
+
+accrue appends: a rerun pointed at the same output path writes a second
+`pipeline_start` … `pipeline_end` frame, with its own `run_id`, into the same
+file. The server indexes **each run separately**. A `retry_start` segment
+heals the run its `run_id` names. Every run-scoped route (`/api/run`,
+`/api/values`, `/api/cell`, `/api/events`, `/api/retry`, `/api/report`) takes
+an optional `run` query parameter:
+
+- absent → the **latest** run in the file (for `/api/events`: follow the
+  latest, through a new run being appended);
+- a run id from `/api/run`'s `file_runs` → that run;
+- an id the file does not hold → **404**.
+
+A one-run file has exactly one run, and every route reads as it always did.
+Each run's `t`-derived figures (`elapsed_s`, error-group timestamps,
+throughput) are measured from that run's own `pipeline_start`. accrue keeps
+`t` running across appended runs.
+
 ## Cell-state bytes
 
 Cell state fits one byte (also documented in CLAUDE.md):
@@ -136,9 +155,27 @@ Full snapshot of the run, including the complete cell-state array.
   },
   "overview": {                    // pipeline blueprint (see below); a log with
     "present": false               // no manifest carries ONLY {"present": false}
-  }
+  },
+  "file_runs": [                   // every run in the log file, newest first;
+    {                              // one entry for a one-run file
+      "id": "2026-08-17a",         // pass as ?run= to read this run
+      "started_at": "2026-08-17T09:35:12Z",  // string | null
+      "finished": true,            // its pipeline_end has been seen
+      "live": false,               // mtime recency, and only ever true for
+                                   // the run receiving the newest records
+      "latest": true               // the run served when ?run= is absent
+    }
+  ]
 }
 ```
+
+`run.live` follows the same rule as `file_runs[].live`. When a later run
+shares the file, an earlier run is never live, because the writes keeping the
+mtime fresh are not its own. Retry is offered on the latest run only. An
+earlier run's `retry` block reads `available: false` with
+`reason: "retry re-runs the latest run in this file; switch to it to retry"`:
+the `--pipeline`/`--data` the server was launched with belong to the latest
+run.
 
 `resume_command` is the actual command line that reproduces this server with
 retry enabled — including `--data` and `--prices` when the launch used them. When the server
@@ -450,7 +487,10 @@ a field that lives outside `stats` in `/api/run` so it can ride the stream:
 delta. The server sets it on the first delta published after it rebuilds its
 in-memory index — which happens when the follower detects the log was
 **truncated and regrown** (a new run written over the same path; the tail's
-generation bumps). After such a rebuild, cells that existed only in the old
+generation bumps) — and, on every stream, when a new run is **appended** to
+the file (each client's `file_runs` is stale, and a stream following the
+latest has a new latest run). `?run=<id>` scopes the stream to that run's
+deltas. After such a rebuild, cells that existed only in the old
 file are still *in-grid*, so a client cannot gap-detect them (a gap is an
 out-of-grid row/step index). A `reset` delta tells the client its whole
 snapshot is stale: it must **refetch `/api/run` wholesale**, not just
@@ -477,6 +517,9 @@ holds sample payloads, one JSON payload per line (the dev stub replays them
 as `delta` events).
 
 ## `POST /api/retry`
+
+Takes the optional `?run=` (rows and groups resolve against that run). Any
+run but the latest answers 409 (see `file_runs` above).
 
 Re-runs failed cells with `Pipeline.retry_failed_async()` and appends the
 result to the log being served (accrue writes a `retry_start` … `retry_end`
