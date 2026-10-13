@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from .index import RunIndex
 
 DASH = "—"  # em-dash: an honestly-unknown number, never a fabricated 0
+#: PRICES_HINT in static/lib/fmt.js: how to price a model the table lacks.
+PRICES_HINT = "supply one with --prices <file.toml>"
 STATE_LABELS = ("pending", "running", "ok", "cached", "retrying", "error", "skipped")
 #: One swatch color per cell-state byte, from the token table (bg tints).
 STATE_COLORS = (
@@ -65,6 +67,7 @@ h2{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;
 .tile .v{font-family:var(--font-mono);font-size:20px;margin-top:6px;}
 .tile .v .dim{color:var(--faint-1);font-size:15px;}
 .tile .v.red{color:var(--error-text);}
+.tile .v.unpriced{font-size:12px;line-height:1.4;color:var(--muted);overflow-wrap:anywhere;}
 table{width:100%;border-collapse:collapse;font-size:12.5px;}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border-1);
   vertical-align:top;}
@@ -86,6 +89,8 @@ td.err{color:var(--error-text);font-family:var(--font-mono);}
 .bar-track{background:var(--component);border-radius:4px;overflow:hidden;height:14px;}
 .bar-fill{display:block;height:14px;background:var(--jade-9);border-radius:0 4px 4px 0;}
 .bar-val{font-family:var(--font-mono);text-align:right;font-size:12px;}
+.bar-row.unpriced .bar-val{color:var(--faint-2);}
+.caveat{color:var(--faint-2);font-size:12px;margin-top:8px;}
 .egroup{background:var(--surface);border:1px solid var(--border-1);border-radius:10px;
   padding:12px 14px;margin:10px 0;}
 .egroup .top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;}
@@ -176,9 +181,16 @@ def _tiles(snap: dict[str, Any]) -> str:
     cost = snap["cost"]
     done = _int(rows["done"])
     total = _int(rows["total"])
+    # As the dashboard's Spend tile: name the model a missing price belongs
+    # to rather than an em-dash that can't tell "unpriced" from "not spent".
+    unpriced = _unpriced_text(stats.get("unpriced") or [])
+    if stats["spend"] is None and unpriced:
+        spend = _tile("Spend", unpriced, tone="unpriced")
+    else:
+        spend = _tile("Spend", _money(stats["spend"]))
     tiles = [
         _tile("Rows enriched", f"{done} <span class='dim'>/ {total}</span>", raw=True),
-        _tile("Spend", _money(stats["spend"])),
+        spend,
         _tile("Cache hits", _pct(stats["cache_hit_rate"])),
         _tile("Cache saved", _money(stats["cache_saved"])),
         _tile("Errors", _int(stats["errors"]), tone="red" if stats["errors"] else ""),
@@ -249,6 +261,9 @@ def _cost_section(snap: dict[str, Any]) -> str:
     cost = snap["cost"]
     by_model = cost["by_model"]
     tokens = cost["tokens"]
+    # Models that spent tokens with no price get a "no price" row, as on the
+    # Cost tab, so a partly-priced run doesn't read as if they cost nothing.
+    unpriced = snap["stats"].get("unpriced") or []
     out = ["<h2>Cost</h2>"]
     if by_model:
         mx = max(by_model.values()) or 1.0
@@ -263,7 +278,20 @@ def _cost_section(snap: dict[str, Any]) -> str:
                 f"<span class='bar-val'>{_esc(_money(usd))}</span></div>"
             )
         out.append("".join(bars))
-    else:
+    for model in unpriced:
+        out.append(
+            "<div class='bar-row unpriced'>"
+            f"<span class='lbl mono'>{_esc(model)}</span>"
+            "<span class='bar-track'></span>"
+            "<span class='bar-val'>no price</span></div>"
+        )
+    if unpriced:
+        out.append(
+            f"<p class='caveat'>No price for {_esc(', '.join(unpriced))} {DASH} "
+            f"{_esc(PRICES_HINT)}. Tokens on unpriced models are left out of "
+            "every dollar figure.</p>"
+        )
+    if not by_model and not unpriced:
         out.append("<p class='empty'>No priced models in this run.</p>")
     out.append(
         "<div class='tiles' style='margin-top:16px'>"
@@ -339,6 +367,14 @@ def _money(value: Any) -> str:
     amount = abs(value)
     digits = 4 if 0 < amount < 0.01 else 2
     return f"{'−' if value < 0 else ''}${amount:.{digits}f}"
+
+
+def _unpriced_text(models: list[str]) -> str:
+    # fmtUnpriced in static/lib/fmt.js: "no price for claude-x +2 more".
+    if not models:
+        return ""
+    more = f" +{len(models) - 1} more" if len(models) > 1 else ""
+    return f"no price for {models[0]}{more}"
 
 
 def _pct(value: Any) -> str:

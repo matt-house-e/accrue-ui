@@ -214,3 +214,56 @@ def test_report_cost_matches_the_cost_tab_with_a_prices_file(tmp_path: Path):
     assert "No priced models" not in html_doc
     assert "<div class='k'>Spend</div><div class='v'>$0.0028</div>" in html_doc
     assert "<span class='bar-val'>$0.0028</span>" in html_doc
+
+
+def test_report_names_an_unpriced_model_like_the_cost_tab(tmp_path: Path):
+    """A model with no price is named with the --prices hint, not "—"."""
+    with client_for(_log(tmp_path)) as client:  # gpt-5.2: not in the table
+        snap = client.get("/api/run").json()
+        html_doc = client.get("/api/report").text
+    assert snap["stats"]["unpriced"] == ["gpt-5.2"]
+    assert "No priced models" not in html_doc
+    assert (
+        "<div class='k'>Spend</div>"
+        "<div class='v unpriced'>no price for gpt-5.2</div>" in html_doc
+    )
+    assert "<span class='bar-val'>no price</span>" in html_doc
+    assert "supply one with --prices &lt;file.toml&gt;" in html_doc
+
+
+def test_report_lists_the_unpriced_model_of_a_partly_priced_run(tmp_path: Path):
+    """The priced model's bar keeps its dollars; the other reads "no price"."""
+    records = _report_records()
+    records[0]["steps"][0]["model"] = "claude-sonnet-4-6"
+    records.insert(
+        -1,
+        row("score", 0, 1.5, usage={"in": 500, "out": 50, "cost": None}),
+    )
+    path = tmp_path / "partly.jsonl"
+    write_log(path, records)
+    age_file(path)
+    with client_for(path) as client:
+        snap = client.get("/api/run").json()
+        html_doc = client.get("/api/report").text
+    assert snap["cost"]["by_model"] == {"claude-sonnet-4-6": 0.009}
+    assert snap["stats"]["unpriced"] == ["gpt-5.2"]
+    assert "<div class='k'>Spend</div><div class='v'>$0.0090</div>" in html_doc
+    assert "<span class='bar-val'>$0.0090</span>" in html_doc
+    assert (
+        "<div class='bar-row unpriced'><span class='lbl mono'>gpt-5.2</span>"
+        in html_doc
+    )
+
+
+def test_report_says_no_priced_models_only_when_no_model_spent(tmp_path: Path):
+    """Function steps (model null) price to nothing and name nothing."""
+    records = _report_records()
+    for step in records[0]["steps"]:
+        step["model"] = None
+    path = tmp_path / "functions.jsonl"
+    write_log(path, records)
+    age_file(path)
+    with client_for(path) as client:
+        html_doc = client.get("/api/report").text
+    assert "No priced models in this run." in html_doc
+    assert "no price for" not in html_doc
