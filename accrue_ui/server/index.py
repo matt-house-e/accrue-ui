@@ -812,6 +812,9 @@ class RunIndex:
             "throughput_per_min": throughput,
             "eta_s": eta_s,
             "cache_saved": cost["_cache_saved"],
+            # Here rather than in "cost" so it rides SSE deltas: the Spend
+            # tile names the missing price live, without a snapshot refetch.
+            "unpriced": cost["_unpriced"],
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -819,7 +822,7 @@ class RunIndex:
         cells = self._cells
         cost = self._cost_block()
         stats = self._stats_block(cost)
-        del cost["_spend"], cost["_cache_saved"]
+        del cost["_spend"], cost["_cache_saved"], cost["_unpriced"]
 
         return {
             "run": self.run_meta(),
@@ -1165,12 +1168,17 @@ class RunIndex:
         batch_saved = 0.0
         cache_saved = 0.0
         priced_any = False
+        unpriced: set[str] = set()
 
         for s in self._steps:
             eff_in, eff_out = s.effective_tokens()
             tokens_in += eff_in
             tokens_out += eff_out
             usd = s.effective_cost()
+            if usd is None and s.model and (eff_in or eff_out):
+                # Spent tokens on a model the table has no price for: name it,
+                # so the UI can say which price is missing instead of "—".
+                unpriced.add(s.model)
             if usd is not None:
                 priced_any = True
                 by_step[s.name] = round(usd, 6)
@@ -1199,6 +1207,7 @@ class RunIndex:
             "batch_saved": round(batch_saved, 6) if priced_any else None,
             "_spend": spend,
             "_cache_saved": round(cache_saved, 6) if priced_any else None,
+            "_unpriced": sorted(unpriced),
         }
 
     # ---------------------------------------------------------------- values

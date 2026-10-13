@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from accrue_ui.server.index import RunIndex
 from accrue_ui.server.pricing import (
     BATCH_DISCOUNT,
     PRICES,
@@ -11,6 +14,8 @@ from accrue_ui.server.pricing import (
     lookup,
     price_usd,
 )
+from accrue_ui.server.tail import TailRecord
+from tests.conftest import row
 
 CURRENT_CLAUDE = [
     "claude-fable-5-1",
@@ -115,3 +120,127 @@ def test_an_explicit_table_replaces_the_built_in_one():
     usd = price_usd("house-model", 1_000_000, 1_000_000, prices=table)
     assert usd == pytest.approx(3.0)
     assert price_usd("claude-sonnet-4-6", 1_000, 1_000, prices=table) is None
+
+
+# ---- the run index: an amana-style log prices, unknown models are named ----
+
+
+def _amana_log(model: str, *, mode: str = "realtime") -> list[dict]:
+    """An LLM ``extract`` step on *model*, then a function ``calculate`` step.
+
+    The shape of the amana contract-analysis runs that showed Spend "—"
+    (accrue-ui#31): live mode reports usage per row, batch mode only on
+    step_end.
+    """
+    batch = mode == "batch"
+    usage = {"in": 10_000, "out": 1_000, "cost": None}
+    records: list[dict] = [
+        {
+            "v": 1,
+            "t": 0.0,
+            "type": "pipeline_start",
+            "run_id": "amana",
+            "started_at": "2026-09-25T10:00:00+00:00",
+            "num_rows": 2,
+            "display_key": None,
+            "steps": [
+                {"name": "extract", "level": 0, "mode": mode, "model": model},
+                {"name": "calculate", "level": 1, "mode": "realtime", "model": None},
+            ],
+            "plan": None,
+        },
+        {
+            "v": 1,
+            "t": 0.1,
+            "type": "step_start",
+            "step": "extract",
+            "level": 0,
+            "mode": mode,
+            "num_rows": 2,
+        },
+    ]
+    for r in range(2):
+        records.append(row("extract", r, 1.0 + r, usage=None if batch else usage))
+    records.append(
+        {
+            "v": 1,
+            "t": 3.0,
+            "type": "step_end",
+            "step": "extract",
+            "num_errors": 0,
+            "usage": {"in": 20_000, "out": 2_000, "cost": None},
+            "elapsed_s": 2.9,
+            "batch_id": "msgbatch_1" if batch else None,
+        }
+    )
+    records.append(
+        {
+            "v": 1,
+            "t": 3.1,
+            "type": "step_end",
+            "step": "calculate",
+            "num_errors": 0,
+            "usage": {"in": 0, "out": 0, "cost": None},
+            "elapsed_s": 0.1,
+            "batch_id": None,
+        }
+    )
+    return records
+
+
+def _index(records: list[dict]) -> RunIndex:
+    index = RunIndex(Path("unused.jsonl"))
+    for record in records:
+        index.apply(TailRecord(0, 1, record))
+    return index
+
+
+def test_amana_log_on_claude_sonnet_4_6_shows_a_dollar_cost():
+    snap = _index(_amana_log("claude-sonnet-4-6")).snapshot()
+    # 20k in at $3 + 2k out at $15 per 1M tokens.
+    assert snap["stats"]["spend"] == pytest.approx(0.09)
+    assert snap["cost"]["by_model"] == {"claude-sonnet-4-6": pytest.approx(0.09)}
+    assert snap["stats"]["unpriced"] == []
+
+
+def test_amana_batch_log_prices_from_step_end_at_the_batch_discount():
+    snap = _index(_amana_log("claude-sonnet-4-6", mode="batch")).snapshot()
+    assert snap["stats"]["spend"] == pytest.approx(0.045)
+    assert snap["cost"]["batch_saved"] == pytest.approx(0.045)
+
+
+def test_unknown_model_is_named_not_dashed():
+    snap = _index(_amana_log("acme-contracts-9")).snapshot()
+    assert snap["stats"]["spend"] is None
+    assert snap["stats"]["unpriced"] == ["acme-contracts-9"]
+    # The function step spent no tokens and has no model: never "unpriced".
+    assert "calculate" not in snap["stats"]["unpriced"]
+
+
+def test_partly_priced_run_still_names_the_unpriced_model():
+    records = _amana_log("claude-sonnet-4-6")
+    records[0]["steps"].append(
+        {"name": "review", "level": 1, "mode": "realtime", "model": "acme-9"}
+    )
+    records.append(row("review", 0, 4.0, usage={"in": 500, "out": 50, "cost": None}))
+    snap = _index(records).snapshot()
+    assert snap["stats"]["spend"] == pytest.approx(0.09)
+    assert snap["stats"]["unpriced"] == ["acme-9"]
+
+
+def test_emitter_supplied_cost_counts_as_priced():
+    records = _amana_log("acme-9")
+    for rec in records:
+        if rec["type"] == "row_complete":
+            rec["usage"] = {"in": 10_000, "out": 1_000, "cost": 0.01}
+    snap = _index(records).snapshot()
+    assert snap["stats"]["spend"] == pytest.approx(0.02)
+    assert snap["stats"]["unpriced"] == []
+
+
+def test_unpriced_rides_the_sse_delta():
+    records = _amana_log("acme-9")
+    index = _index(records[:2])  # pipeline_start + step_start: no usage yet
+    assert index.drain_delta()["stats"]["unpriced"] == []
+    index.apply(TailRecord(0, 1, records[2]))  # first row with usage
+    assert index.drain_delta()["stats"]["unpriced"] == ["acme-9"]

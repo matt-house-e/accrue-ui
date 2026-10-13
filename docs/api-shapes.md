@@ -83,7 +83,10 @@ Full snapshot of the run, including the complete cell-state array.
                                    // divisor makes the rate meaningless
     "eta_s": 384,                  // estimated seconds remaining; null when
                                    // there is no throughput to derive it from
-    "cache_saved": 1.94            // number | null, same rule as spend
+    "cache_saved": 1.94,           // number | null, same rule as spend
+    "unpriced": ["acme-9"]         // models that spent tokens but have no
+                                   // price (built-in table or --prices), sorted;
+                                   // [] when everything that spent is priced
   },
   "cells": {
     "encoding": "b64",
@@ -147,7 +150,12 @@ no model (function steps) or only unknown models cannot be priced at all, and
 the server reports null rather than a misleading `0`. `cost.by_step` /
 `cost.by_model` then hold only the steps that *could* be priced, and are
 `{}` when none could. Clients must render null as an em-dash, not as blank
-and not as `$0.00`.
+and not as `$0.00` — except when `stats.unpriced` is non-empty: then the
+figure is null *because* a model has no price, and clients name it ("no price
+for acme-9") with the `--prices <file.toml>` hint instead. `stats.unpriced`
+lives in `stats` rather than `cost` so it rides the SSE delta like `spend`.
+A function step (`model: null`) or a step that spent no tokens is never in
+it; a step whose log carries `usage.cost` counts as priced.
 
 Invariants the server must keep:
 

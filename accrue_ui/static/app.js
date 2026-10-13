@@ -3,7 +3,14 @@ import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { html } from "./lib/html.js";
 import { IconChevronDown, IconSearch } from "./lib/icons.js";
-import { fmtDuration, fmtInt, fmtMoney, fmtPct } from "./lib/fmt.js";
+import {
+  fmtDuration,
+  fmtInt,
+  fmtMoney,
+  fmtPct,
+  fmtUnpriced,
+  unpricedTip,
+} from "./lib/fmt.js";
 import { connect } from "./lib/sse.js";
 import { initTooltips } from "./lib/tooltip.js";
 import {
@@ -107,6 +114,13 @@ function TopBar({ snap }) {
 // Rendered wherever a number is genuinely unknown, never a bare blank and
 // never a fabricated 0 (docs/api-shapes.md: these fields are nullable).
 const DASH = "—";
+
+// Spend is null because a model has no price, not because nothing was
+// spent: say which (stats.unpriced) instead of the em-dash.
+function unpricedValue(models) {
+  const text = fmtUnpriced(models);
+  return text && html`<span class="unpriced">${text}</span>`;
+}
 
 const FILTERS = [
   ["all", "All rows"],
@@ -213,6 +227,8 @@ function StatsStrip({ snap }) {
   const progress = rows.total ? rows.done / rows.total : 0;
   const throughput = stats.throughput_per_min;
   const saved = fmtMoney(stats.cache_saved);
+  const unpriced = stats.unpriced || [];
+  const spendTip = "Token spend so far, at list prices.";
   return html`<div class="stats-strip">
     <${StatTile}
       label="Rows enriched"
@@ -222,8 +238,8 @@ function StatsStrip({ snap }) {
     />
     <${StatTile}
       label="Spend"
-      tip="Token spend so far, at list prices."
-      value=${fmtMoney(stats.spend) ?? DASH}
+      tip=${unpriced.length ? `${spendTip} ${unpricedTip(unpriced)}` : spendTip}
+      value=${fmtMoney(stats.spend) ?? unpricedValue(unpriced) ?? DASH}
     />
     <${StatTile}
       label="Cache hits"
