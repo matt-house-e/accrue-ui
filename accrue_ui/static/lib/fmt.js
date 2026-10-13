@@ -28,6 +28,12 @@ export function unpricedTip(models) {
   return `No price for ${models.join(", ")} — ${PRICES_HINT}.`;
 }
 
+// Cache tokens (cost.tokens.cache_*, cell usage.cache_*) are null when the
+// log predates accrue's cache-token fields: unknown, which 0 would misstate.
+export const CACHE_NOT_RECORDED = "not recorded";
+export const CACHE_NOT_RECORDED_TIP =
+  "This run log was written before accrue 1.5.1 added cache-token fields, so cache reads and writes are unknown and every dollar figure leaves them out.";
+
 export function fmtPct(x) {
   if (x == null) return null;
   return `${Math.round(x * 100)}%`;

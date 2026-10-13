@@ -1122,6 +1122,7 @@ button:disabled { cursor: not-allowed; }
 }
 .token-row .k { color: var(--faint-2); font-family: var(--font-sans); font-size: 11px; }
 .token-row .v { color: var(--ink); font-weight: 500; }
+.token-row .v.dim { color: var(--faint-2); font-weight: 400; }
 
 @media (max-width: 900px) {
   .cost { grid-template-columns: 1fr; }
