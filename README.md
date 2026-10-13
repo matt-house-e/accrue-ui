@@ -58,8 +58,8 @@ accrue-ui .accrue/runs/2026-08-20a.jsonl --pipeline enrich:pipeline --data enric
 ```
 
 Run it from the same directory the pipeline ran in, so the retry resolves
-the same checkpoint. Without `--pipeline` the buttons stay disabled and say
-why.
+the same checkpoint. Without `--pipeline`, or for a run that had
+checkpointing off, the buttons stay disabled and say why.
 
 ## Prices
 

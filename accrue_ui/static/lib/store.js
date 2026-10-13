@@ -108,6 +108,18 @@ export function errorGroupFor(stepName, row) {
   return null;
 }
 
+// Does *row* have a failure accrue says will come back unchanged on retry?
+// "Retry this row" re-runs every failed cell of the row, so any step counts.
+export function rowFailsAgain(row) {
+  const snap = snapshot.value;
+  if (!snap) return false;
+  return (snap.error_groups || []).some(
+    (g) =>
+      g.retryable === false &&
+      (g.rows || []).some(([lo, hi]) => row >= lo && row <= hi)
+  );
+}
+
 // ---- fetch helpers ------------------------------------------------------
 
 // `path` scoped to the selected run: every run-scoped /api/* route takes an
@@ -239,7 +251,7 @@ function pollUntilRetryDone() {
   }, RETRY_POLL_MS);
 }
 
-// body: {rows:[...]} | {group:{step,type}} | {all:true}. `source` tags which
+// body: {rows:[...]} | {group:{step,type,key}} | {all:true}. `source` tags which
 // button asked, so the error renders next to that one.
 export async function postRetry(body, source) {
   if (retryBusy()) return false;

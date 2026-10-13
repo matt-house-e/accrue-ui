@@ -30,6 +30,26 @@ function Histogram({ buckets }) {
   </div>`;
 }
 
+// A retry of errors that will fail again takes two clicks: the first arms
+// the button with the warning, the second sends. Armed state is the source
+// string, so moving to another group or row disarms it, and so does leaving
+// the button.
+export function useRetryConfirm() {
+  const [armed, setArmed] = useState(null);
+  return {
+    isArmed: (source) => armed === source,
+    click(warn, source, send) {
+      if (warn && armed !== source) {
+        setArmed(source);
+        return;
+      }
+      setArmed(null);
+      send();
+    },
+    disarm: () => setArmed(null),
+  };
+}
+
 // Inline failure notice: quiet red, next to the button that asked.
 export function RetryNote({ source }) {
   const err = retryError.value;
@@ -37,18 +57,35 @@ export function RetryNote({ source }) {
   return html`<span class="retry-note mono">${err.message}</span>`;
 }
 
-function RetryButton({ count, retry, body, source, primary = false }) {
+function RetryButton({
+  count,
+  retry,
+  body,
+  source,
+  primary = false,
+  warn = false,
+}) {
   const busy = retryBusy();
-  const label = primary
+  const confirm = useRetryConfirm();
+  const armed = warn && confirm.isArmed(source);
+  let label = primary
     ? `Retry all ${fmtInt(count)} failed rows`
     : `Retry ${fmtInt(count)} rows`;
+  if (armed) {
+    label = primary
+      ? "Some fail again — retry anyway?"
+      : "Fails again — retry anyway?";
+  }
+  const kind = armed ? "btn-warn" : primary ? "btn-primary" : "btn-secondary";
   const btn = html`<button
-    class=${`btn ${primary ? "btn-primary" : "btn-secondary"}`}
+    class=${`btn ${kind}`}
     disabled=${!retry.available || busy}
     onClick=${(e) => {
       e.stopPropagation();
-      postRetry(body, source);
+      confirm.click(warn, source, () => postRetry(body, source));
     }}
+    onMouseLeave=${confirm.disarm}
+    onBlur=${confirm.disarm}
   >
     ${busy ? "Retrying…" : label}
   </button>`;
@@ -64,12 +101,20 @@ function RetryButton({ count, retry, body, source, primary = false }) {
 }
 
 function GroupCard({ group, expanded, onToggle, retry }) {
+  const failsAgain = group.retryable === false;
   return html`<div class="group-card">
     <button class="group-head" onClick=${onToggle}>
       <span class="count-pill">${group.count}</span>
       <span class="group-title">
         <span class="mono">${group.step}</span> ·${" "}
         <span class="mono">${group.type}</span>
+        ${failsAgain &&
+        html`<span
+          class="cause-tag tip"
+          data-tip="Not transient: a retry re-sends the identical request"
+          ><span class="tip-label">fails again</span></span
+        >`}
+        <div class="group-msg">${group.message}</div>
         <div class="group-sub">
           ${rangeLabel(group.rows)} · first ${fmtClock(group.first_t, false)} ·
           last ${fmtClock(group.last_t, false)}
@@ -78,8 +123,9 @@ function GroupCard({ group, expanded, onToggle, retry }) {
       <${RetryButton}
         count=${group.count}
         retry=${retry}
-        body=${{ group: { step: group.step, type: group.type } }}
-        source=${`${group.step}:${group.type}`}
+        body=${{ group: { step: group.step, type: group.type, key: group.key } }}
+        source=${`${group.step}:${group.type}:${group.key}`}
+        warn=${failsAgain}
       />
     </button>
     ${expanded &&
@@ -141,7 +187,7 @@ export function Triage() {
     </div>
     ${groups.map(
       (g, i) => html`<${GroupCard}
-        key=${`${g.step}:${g.type}`}
+        key=${`${g.step}:${g.type}:${g.key}`}
         group=${g}
         expanded=${expanded === i}
         onToggle=${() => setExpanded(expanded === i ? -1 : i)}
@@ -159,6 +205,7 @@ export function Triage() {
         body=${{ all: true }}
         source="all"
         primary=${true}
+        warn=${groups.some((g) => g.retryable === false)}
       />
     </div>
   </div>`;

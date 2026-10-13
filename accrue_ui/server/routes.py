@@ -153,9 +153,10 @@ def _selected_rows(body: Any, index: RunIndex) -> list[int]:
     """Resolve a retry request body to row indices, or raise HTTPException.
 
     Exactly one selector: ``{"rows": [...]}`` (explicit), ``{"group":
-    {"step": s, "type": t}}`` (one error group, resolved against the index's
-    current groups — so a group that healed since the page loaded is a 404,
-    not a silent no-op), or ``{"all": true}`` (every errored row).
+    {"step": s, "type": t, "key": k}}`` (one error group, resolved against
+    the index's current groups — so a group that healed since the page
+    loaded is a 404, not a silent no-op; without ``key``, every group of that
+    step and type), or ``{"all": true}`` (every errored row).
     """
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
@@ -201,11 +202,19 @@ def _selected_rows(body: Any, index: RunIndex) -> list[int]:
         return sorted(set(rows))
 
     group = body["group"]
-    if not isinstance(group, dict) or not isinstance(group.get("step"), str):
+    valid = (
+        isinstance(group, dict)
+        and isinstance(group.get("step"), str)
+        and isinstance(group.get("key"), (str, type(None)))
+    )
+    if not valid:
         raise HTTPException(
-            status_code=400, detail='"group" must be {"step": ..., "type": ...}'
+            status_code=400,
+            detail='"group" must be {"step": ..., "type": ..., "key": ...}',
         )
-    rows = index.group_rows(group["step"], str(group.get("type") or "Error"))
+    rows = index.group_rows(
+        group["step"], str(group.get("type") or "Error"), group.get("key")
+    )
     if rows is None:
         raise HTTPException(
             status_code=404,
@@ -220,8 +229,10 @@ async def post_retry(request: Request, run: str | None = None) -> JSONResponse:
 
     409 covers every way retry can be off the table — the server was
     launched without a usable ``--pipeline``, one retry is already in
-    flight (only ever one at a time), or *run* is not the latest run in
-    the file. Accepted retries run in the background; watch ``/api/run``
+    flight (only ever one at a time), *run* is not the latest run in the
+    file, or its manifest says checkpointing was off, so there is no
+    checkpoint to resume from. Accepted retries run in the background;
+    watch ``/api/run``
     and the SSE stream for the cells healing.
     """
     index = _index(request, run)

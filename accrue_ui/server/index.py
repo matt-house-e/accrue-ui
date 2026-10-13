@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from collections import deque
 from collections.abc import Mapping
@@ -69,6 +70,16 @@ MAX_PROMPT_BODY_BYTES = 16 * 1024 * 1024
 SCHEMA_V = 1
 #: ``retry.reason`` for a run that is not the latest in its file.
 RETRY_NOT_LATEST = "retry re-runs the latest run in this file; switch to it to retry"
+#: ``retry.reason`` for a run whose manifest says checkpointing was off:
+#: ``retry_failed()`` resumes from the checkpoint, and there is none.
+RETRY_NO_CHECKPOINT = (
+    "this run had checkpointing off, so there is no checkpoint to retry from; "
+    "re-run it with checkpointing on"
+)
+#: Cap on an error group's normalised-message key. Past it the tail is
+#: usually row data (an error quoting the row's input), which would split one
+#: cause into a group per row.
+GROUP_KEY_MAX_CHARS = 200
 #: Prompt/response capture sidecar written beside the run log, the same rule
 #: accrue's ``prompt_sidecar_path`` uses: ``<run>.jsonl`` -> ``<run>.prompts.jsonl``.
 PROMPT_SIDECAR_SUFFIX = ".prompts.jsonl"
@@ -182,7 +193,14 @@ class StepState:
 
 @dataclass
 class ErrorGroup:
-    """Failures of one (step, error type), keyed by row so retries can heal.
+    """Failures of one cause, keyed by row so retries can heal.
+
+    A cause is (step, error type, normalised message): one exception class
+    covers failures as different as a rate limit and a max_tokens
+    truncation, so the type alone mixes errors that will clear with ones
+    that fail the same way every time. ``retryable`` is the group's verdict
+    on which it is (see :func:`_error_verdict`) and ``kind`` names the known
+    non-transient failure, when the message matched one.
 
     ``rows`` maps row index -> log-time of that row's failure, which makes
     membership the single source of truth: ``count`` is ``len(rows)``, the
@@ -193,7 +211,10 @@ class ErrorGroup:
 
     step: str
     type: str
+    key: str
     message: str
+    retryable: bool | None = None
+    kind: str | None = None
     rows: dict[int, float] = field(default_factory=dict)
 
     @property
@@ -265,7 +286,7 @@ class RunIndex:
         self._rows_done = 0
         self._row_keys: dict[int, str] = {}  # values-derived heuristic labels
         self._row_keys_explicit: dict[int, str] = {}  # from row_complete "key"
-        self._error_groups: dict[tuple[str, str], ErrorGroup] = {}
+        self._error_groups: dict[tuple[str, str, str], ErrorGroup] = {}
         # Completion log-times inside the throughput window, non-decreasing
         # (log guarantee). Trimmed from the left on every append, so a
         # million-row run holds a window's worth, not a million floats.
@@ -664,11 +685,19 @@ class RunIndex:
 
         # --- error groups -------------------------------------------------
         if state == ERROR:
-            etype = _error_type(error)
-            group = self._error_groups.get((name, etype))
+            gkey = _group_key(name, error)
+            group = self._error_groups.get(gkey)
             if group is None:
-                group = ErrorGroup(step=name, type=etype, message="")
-                self._error_groups[(name, etype)] = group
+                retryable, kind = _error_verdict(error)
+                group = ErrorGroup(
+                    step=name,
+                    type=gkey[1],
+                    key=gkey[2],
+                    message="",
+                    retryable=retryable,
+                    kind=kind,
+                )
+                self._error_groups[gkey] = group
             if not group.message:
                 group.message = str((error or {}).get("msg") or "")
             group.rows[row] = t
@@ -685,17 +714,17 @@ class RunIndex:
         """Drop *row* from the group its previous failure belonged to.
 
         Called whenever a cell leaves the error state — healed by a retry, or
-        re-failed with a different error type (it then joins the new group).
-        The group itself disappears with its last row, so a fully healed run
+        re-failed with a different cause (it then joins the new group). The
+        group itself disappears with its last row, so a fully healed run
         reports no error groups at all.
         """
-        key = (step_name, _error_type(cell.error if cell else None))
+        key = _group_key(step_name, cell.error if cell else None)
         group = self._error_groups.get(key)
         if group is None:
             return
         group.rows.pop(row, None)
         if not group.rows:
-            del self._error_groups[(group.step, group.type)]
+            del self._error_groups[key]
 
     def _apply_step_end(self, data: dict[str, Any]) -> None:
         name = data.get("step")
@@ -915,12 +944,25 @@ class RunIndex:
         """``/api/run``'s retry block — availability comes from the controller.
 
         A superseded run (a later one shares its file) reports retry
-        unavailable whatever the controller says: see :attr:`superseded`.
+        unavailable whatever the controller says: see :attr:`superseded`. So
+        does a run the manifest says had checkpointing off — accrue's
+        ``retry_failed()`` raises without a checkpoint to resume from.
         """
         block = self.retry.block()
         if self.superseded:
             return {**block, "available": False, "reason": RETRY_NOT_LATEST}
+        if self._checkpointing_off():
+            return {**block, "available": False, "reason": RETRY_NO_CHECKPOINT}
         return block
+
+    def _checkpointing_off(self) -> bool:
+        """The manifest says the run wrote no checkpoint for retry to read.
+
+        Only an explicit ``false`` counts: a log without a manifest, or one
+        whose config could not say, leaves retry to the controller.
+        """
+        config = (self.manifest or {}).get("config")
+        return isinstance(config, dict) and config.get("checkpointing") is False
 
     def overview_block(
         self, by_step_cost: dict[str, float] | None = None
@@ -1179,17 +1221,21 @@ class RunIndex:
         for g in groups:
             ts = list(g.rows.values())
             first_t, last_t = min(ts), max(ts)
+            idx = self._step_idx.get(g.step)
+            batch = idx is not None and self._steps[idx].is_batch
             out.append(
                 {
                     "step": g.step,
                     "type": g.type,
+                    "key": g.key,
                     "count": g.count,
                     "message": g.message,
+                    "retryable": g.retryable,
                     "rows": _compress_ranges(sorted(g.rows)),
                     "first_t": self._iso(first_t),
                     "last_t": self._iso(last_t),
                     "histogram": _histogram(ts, first_t, last_t),
-                    "hint": _burst_hint(g.count, first_t, last_t),
+                    "hint": _group_hint(g, batch, first_t, last_t),
                 }
             )
         return out
@@ -1203,10 +1249,25 @@ class RunIndex:
             rows.update(group.rows)
         return sorted(rows)
 
-    def group_rows(self, step: str, error_type: str) -> list[int] | None:
-        """Rows of one error group, or None when no such group exists."""
-        group = self._error_groups.get((step, error_type))
-        return sorted(group.rows) if group is not None else None
+    def group_rows(
+        self, step: str, error_type: str, key: str | None = None
+    ) -> list[int] | None:
+        """Rows of one error group, or None when no such group exists.
+
+        Without *key* it is every group of that (step, type) — the selector
+        from before groups split by message, kept so it still means what it
+        did.
+        """
+        if key is not None:
+            group = self._error_groups.get((step, error_type, key))
+            return sorted(group.rows) if group is not None else None
+        rows: set[int] = set()
+        found = False
+        for (g_step, g_type, _), group in self._error_groups.items():
+            if g_step == step and g_type == error_type:
+                rows.update(group.rows)
+                found = True
+        return sorted(rows) if found else None
 
     def _cost_block(self) -> dict[str, Any]:
         by_step: dict[str, float] = {}
@@ -1636,8 +1697,109 @@ class RunLog:
 
 
 def _error_type(error: dict[str, Any] | None) -> str:
-    """Group key for a failure; the v1 log's error object may be null."""
+    """Exception class of a failure; the v1 log's error object may be null."""
     return str((error or {}).get("type") or "Error")
+
+
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE
+)
+#: Request ids, hashes and the like: a long token mixing letters and digits.
+_ID_RE = re.compile(r"\b(?=\w*\d)(?=\w*[a-z])\w{8,}\b", re.IGNORECASE)
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_SPACE_RE = re.compile(r"\s+")
+#: pydantic's quote of the value that failed validation — for an exhausted
+#: parse retry, the model's output for that row. It sits well inside the
+#: key cap, so left in it would give every distinct output its own group.
+_INPUT_VALUE_RE = re.compile(r"input_value=.*?, input_type=")
+
+
+def _normalise_message(msg: str) -> str:
+    """A failure message with the parts that vary per row taken out.
+
+    Ids and numbers become ``#`` (``max_tokens=4000``, a request id, a
+    "try again in 6ms"), and so does the value a validation error quotes, so
+    failures of one cause share a key while a truncation and a rate limit of
+    the same exception class do not.
+    """
+    msg = _INPUT_VALUE_RE.sub("input_value=#, input_type=", msg)
+    msg = _UUID_RE.sub("#", msg)
+    msg = _ID_RE.sub("#", msg)
+    msg = _NUMBER_RE.sub("#", msg)
+    return _SPACE_RE.sub(" ", msg).strip()[:GROUP_KEY_MAX_CHARS]
+
+
+def _group_key(step: str, error: dict[str, Any] | None) -> tuple[str, str, str]:
+    """``(step, type, normalised message)`` — the error-group identity."""
+    msg = str((error or {}).get("msg") or "")
+    return step, _error_type(error), _normalise_message(msg)
+
+
+#: Failures known to come back unchanged on retry, for logs written before
+#: accrue reported ``retryable`` (accrue#169): kind -> message pattern. The
+#: kinds are the deterministic ``LLMAPIError``s accrue's run-log guide lists.
+_NON_RETRYABLE: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("max_tokens", re.compile(r"truncated at max_tokens", re.IGNORECASE)),
+    (
+        "schema",
+        re.compile(
+            r"schema is too complex for compilation|compiled grammar is too large",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "size",
+        re.compile(
+            r"over the provider's per-request limit|over the batch size limit"
+            r"|request[_ ]too[_ ]large",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+#: What to change before a retry can help, per non-transient kind.
+_FIX_HINTS = {
+    "max_tokens": "Raise the step's max_tokens.",
+    "schema": "Shrink the step's output schema, or split its fields across steps.",
+    "size": "Shrink or split the row's attachments.",
+    None: "Change the step, its schema or the input first.",
+}
+
+
+def _error_verdict(error: dict[str, Any] | None) -> tuple[bool | None, str | None]:
+    """``(retryable, kind)`` for one failure.
+
+    accrue's own ``retryable`` flag wins when the log has it. Older logs fall
+    back to matching the known deterministic messages; anything unmatched is
+    ``None`` — unknown, treated like a transient error as before.
+    """
+    error = error or {}
+    msg = str(error.get("msg") or "")
+    kind = next((k for k, pat in _NON_RETRYABLE if pat.search(msg)), None)
+    flag = error.get("retryable")
+    if isinstance(flag, bool):
+        return flag, (kind if not flag else None)
+    return (False, kind) if kind is not None else (None, None)
+
+
+def _group_hint(
+    group: ErrorGroup, batch: bool, first_t: float, last_t: float
+) -> str | None:
+    """The advice line on an error group.
+
+    A failure that will come back unchanged gets what to fix instead of
+    advice about load. The burst heuristic is for live steps only: a batch
+    step's results all land when the batch does, so its "burst" is the
+    delivery, not rate limiting.
+    """
+    if group.retryable is False:
+        return (
+            "These fail the same way on every retry — each one re-sends the "
+            f"identical request. {_FIX_HINTS[group.kind]}"
+        )
+    if batch:
+        return None
+    return _burst_hint(group.count, first_t, last_t)
 
 
 def _percentile(sorted_vals: list[float], q: float) -> float:

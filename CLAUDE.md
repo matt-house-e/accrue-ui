@@ -38,7 +38,8 @@ Backend lives in `accrue_ui/server/`:
   - `GET /api/values?start=A&count=N` — windowed row values
   - `GET /api/events` — SSE stream of coalesced deltas, ≤10Hz
   - `POST /api/retry` — retry failed rows: `{rows}`, `{group}` or `{all}`
-    (requires `--pipeline`; 409 otherwise, and while one is already running)
+    (requires `--pipeline`; 409 otherwise, while one is already running, and
+    for a run that is not the latest in its file or had checkpointing off)
   - `GET /api/runs` — list known run logs
 - **`tail.py`** — poll follower: `stat` every ~250ms + read appended bytes,
   partial-line safe. Polling on purpose — **no inotify, it breaks on WSL2**.

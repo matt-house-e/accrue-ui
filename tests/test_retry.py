@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from accrue_ui.server import index as index_mod
 from accrue_ui.server.index import RunIndex
 from accrue_ui.server.retry import RetryController
 from accrue_ui.server.tail import TailRecord
@@ -952,3 +953,265 @@ def test_real_pipeline_retry_heals_the_run(
     assert "retry_start" in types
     assert "retry_end" in types
     assert types.index("retry_start") > types.index("pipeline_end")
+
+
+# ---- error causes: grouping by message, retryable verdict, hints ----------
+
+TRUNCATED = (
+    "Anthropic response for model 'claude-haiku-4' was truncated at "
+    "max_tokens={n}; the JSON is incomplete. Raise the step's max_tokens."
+)
+RATE_LIMITED = (
+    "Anthropic rate limit for model 'claude-haiku-4': Error code: 429 - "
+    "{{'request_id': 'req_011CX{n:04d}abcdef'}}"
+)
+
+
+def _causes_log(tmp_path: Path, *, checkpointing: bool | None = True) -> Path:
+    """classify (live): rows 0-11 truncated (an old log — no ``retryable``),
+    rows 12-23 rate limited (``retryable: true``), all in a 2-second burst;
+    enrich (batch): rows 0-11 rate limited in the same burst; row 24 of
+    classify failed with a flag-only non-retryable error."""
+    records = _records(num_rows=25)
+    records[0]["steps"] = [
+        {"name": "classify", "level": 0, "mode": "realtime", "model": None},
+        {"name": "enrich", "level": 1, "mode": "batch", "model": None},
+    ]
+    if checkpointing is not None:
+        records[0]["manifest"] = {
+            "accrue_version": "1.5.1",
+            "config": {"max_workers": 6, "checkpointing": checkpointing},
+            "steps": [],
+            "fields": [],
+        }
+    records[1]["step"] = "classify"
+    for r in range(12):
+        records.append(
+            row(
+                "classify",
+                r,
+                1.0 + r / 10,
+                status="error",
+                error={"type": "LLMAPIError", "msg": TRUNCATED.format(n=4000 + r)},
+            )
+        )
+    for r in range(12, 24):
+        records.append(
+            row(
+                "classify",
+                r,
+                1.0 + r / 10,
+                status="error",
+                error={
+                    "type": "LLMAPIError",
+                    "msg": RATE_LIMITED.format(n=r),
+                    "retryable": True,
+                },
+            )
+        )
+    records.append(
+        row(
+            "classify",
+            24,
+            3.0,
+            status="error",
+            error={"type": "ValueError", "msg": "cannot score", "retryable": False},
+        )
+    )
+    for r in range(12):
+        records.append(
+            row(
+                "enrich",
+                r,
+                5.0 + r / 100,
+                status="error",
+                error={"type": "LLMAPIError", "msg": RATE_LIMITED.format(n=r)},
+            )
+        )
+    log = tmp_path / "causes.jsonl"
+    write_log(log, records)
+    age_file(log)
+    return log
+
+
+def _groups_by_step_and_kind(snap: dict) -> dict[tuple[str, str], dict]:
+    out = {}
+    for g in snap["error_groups"]:
+        kind = "truncated" if "max_tokens" in g["key"] else g["type"]
+        if "rate limit" in g["key"]:
+            kind = "rate_limited"
+        out[(g["step"], kind)] = g
+    return out
+
+
+def test_truncations_and_rate_limits_form_separate_groups(tmp_path: Path):
+    snap = _index_from(_causes_log(tmp_path)).snapshot()
+    groups = _groups_by_step_and_kind(snap)
+    assert set(groups) == {
+        ("classify", "truncated"),
+        ("classify", "rate_limited"),
+        ("classify", "ValueError"),
+        ("enrich", "rate_limited"),
+    }
+    truncated = groups[("classify", "truncated")]
+    limited = groups[("classify", "rate_limited")]
+    assert truncated["type"] == limited["type"] == "LLMAPIError"
+    assert truncated["count"] == limited["count"] == 12
+    assert truncated["rows"] == [[0, 11]]
+    assert limited["rows"] == [[12, 23]]
+    # Numbers and ids are out of the key, so per-row variation still groups.
+    assert "#" in truncated["key"] and "4000" not in truncated["key"]
+    assert "req_" not in limited["key"]
+    assert truncated["message"] == TRUNCATED.format(n=4000)  # first raw message
+    assert sum(g["count"] for g in snap["error_groups"]) == snap["stats"]["errors"]
+
+
+def test_hints_follow_the_retryable_verdict(tmp_path: Path):
+    groups = _groups_by_step_and_kind(_index_from(_causes_log(tmp_path)).snapshot())
+
+    # No retryable flag in the log: the message marks it deterministic, and
+    # it gets what to fix — not the rate-limit advice its burst would earn.
+    truncated = groups[("classify", "truncated")]
+    assert truncated["retryable"] is False
+    assert "max_tokens" in truncated["hint"]
+    assert "concurrency" not in truncated["hint"]
+
+    limited = groups[("classify", "rate_limited")]
+    assert limited["retryable"] is True
+    assert "halving concurrency" in limited["hint"]
+
+    flagged = groups[("classify", "ValueError")]
+    assert flagged["retryable"] is False  # the log's flag, no message match
+    assert "same way on every retry" in flagged["hint"]
+
+    # A batch step's results land together: that burst is not rate limiting.
+    batch = groups[("enrich", "rate_limited")]
+    assert batch["retryable"] is None  # old log, unknown message
+    assert batch["hint"] is None
+
+
+@pytest.mark.parametrize(
+    ("msg", "kind"),
+    [
+        ("... was truncated at max_tokens=8000; the JSON is incomplete.", "max_tokens"),
+        ("400: Schema is too complex for compilation", "schema"),
+        ("the compiled grammar is too large", "schema"),
+        (
+            (
+                "Request for this row is 33.10 MB, over the provider's "
+                "per-request limit of 32.00 MB; not sent."
+            ),
+            "size",
+        ),
+        ("Error code: 413 - {'type': 'request_too_large'}", "size"),
+    ],
+)
+def test_known_deterministic_messages_are_not_retryable(msg: str, kind: str):
+    assert index_mod._error_verdict({"type": "LLMAPIError", "msg": msg}) == (
+        False,
+        kind,
+    )
+
+
+def test_a_validation_error_quoting_the_output_still_groups():
+    """An exhausted parse retry quotes the model's output (pydantic's
+    ``input_value=``) well inside the key cap; one cause must not split into a
+    group per distinct output."""
+    msg = (
+        "LLMStep 'classify' failed after 3 parse attempts (model=claude-haiku-4-5)"
+        ": 1 validation error for Out\nindustry\n  Input should be 'saas' or "
+        "'other' [type=literal_error, input_value={v!r}, input_type=str]"
+    )
+    keys = {
+        index_mod._normalise_message(msg.format(v=v))
+        for v in ("healthcare", "retail, wholesale", {"name": "Acme"})
+    }
+    one_key = (
+        "LLMStep 'classify' failed after # parse attempts (model=claude-haiku-#-#)"
+        ": # validation error for Out industry Input should be 'saas' or 'other' "
+        "[type=literal_error, input_value=#, input_type=str]"
+    )
+    assert keys == {one_key}
+
+
+def test_the_logs_retryable_flag_wins_over_the_message():
+    verdict = index_mod._error_verdict(
+        {"type": "LLMAPIError", "msg": "truncated at max_tokens", "retryable": True}
+    )
+    assert verdict == (True, None)
+    assert index_mod._error_verdict({"type": "X", "msg": "timeout"}) == (None, None)
+    assert index_mod._error_verdict(None) == (None, None)
+
+
+def test_a_healed_row_leaves_its_message_group(tmp_path: Path):
+    index = _index_from(_causes_log(tmp_path))
+    for r in range(12):
+        index.apply(TailRecord(0, 1, row("classify", r, 20.0, values={"x": 1})))
+    groups = _groups_by_step_and_kind(index.snapshot())
+    assert ("classify", "truncated") not in groups  # emptied group is gone
+    assert groups[("classify", "rate_limited")]["count"] == 12  # untouched
+
+
+def test_group_rows_by_key_and_by_type(tmp_path: Path):
+    index = _index_from(_causes_log(tmp_path))
+    groups = _groups_by_step_and_kind(index.snapshot())
+    key = groups[("classify", "truncated")]["key"]
+    assert index.group_rows("classify", "LLMAPIError", key) == list(range(12))
+    assert index.group_rows("classify", "LLMAPIError", "nope") is None
+    # Without a key the selector means what it did before: the whole type.
+    assert index.group_rows("classify", "LLMAPIError") == list(range(24))
+
+
+def test_post_retry_group_by_key(tmp_path: Path, write_module):
+    log = _causes_log(tmp_path)
+    mod, client = _retry_client(log, write_module)
+    with client:
+        snap = client.get("/api/run").json()
+        key = _groups_by_step_and_kind(snap)[("classify", "rate_limited")]["key"]
+        resp = client.post(
+            "/api/retry",
+            json={"group": {"step": "classify", "type": "LLMAPIError", "key": key}},
+            headers=ORIGIN,
+        )
+        assert resp.status_code == 202
+        assert resp.json() == {"accepted": 12}
+        _wait_until(lambda: not client.get("/api/run").json()["retry"]["running"])
+    assert sys.modules[mod].CALLS[0]["rows"] == list(range(12, 24))
+
+
+def test_post_retry_rejects_a_non_string_group_key(tmp_path: Path, write_module):
+    _mod, client = _retry_client(_causes_log(tmp_path), write_module)
+    with client:
+        resp = client.post(
+            "/api/retry",
+            json={"group": {"step": "classify", "type": "LLMAPIError", "key": 7}},
+            headers=ORIGIN,
+        )
+    assert resp.status_code == 400
+
+
+def test_retry_is_off_with_a_reason_when_the_run_had_no_checkpoint(
+    tmp_path: Path, write_module
+):
+    log = _causes_log(tmp_path, checkpointing=False)
+    mod, client = _retry_client(log, write_module)
+    with client:
+        block = client.get("/api/run").json()["retry"]
+        resp = client.post("/api/retry", json={"all": True}, headers=ORIGIN)
+    assert block["available"] is False
+    assert "checkpointing off" in block["reason"]
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == block["reason"]
+    assert sys.modules[mod].CALLS == []
+
+
+@pytest.mark.parametrize("checkpointing", [True, None])
+def test_retry_stays_on_unless_the_manifest_says_no_checkpoint(
+    tmp_path: Path, write_module, checkpointing: bool | None
+):
+    log = _causes_log(tmp_path, checkpointing=checkpointing)
+    _mod, client = _retry_client(log, write_module)
+    with client:
+        block = client.get("/api/run").json()["retry"]
+    assert block["available"] is True
+    assert block["reason"] is None

@@ -845,6 +845,13 @@ button:disabled { cursor: not-allowed; }
 }
 .btn-secondary:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
 .btn-secondary:disabled { opacity: 0.45; }
+/* Armed confirm on a retry that will fail again: amber, one more click sends. */
+.btn-warn {
+  background: var(--retry-bg);
+  border: 1px solid var(--retry-text);
+  color: var(--retry-text);
+}
+.btn-warn:disabled { opacity: 0.45; }
 
 /* ---------- triage ---------- */
 
@@ -881,6 +888,24 @@ button:disabled { cursor: not-allowed; }
   font: 400 13px/1.3 var(--font-sans);
   color: var(--ink);
   min-width: 0;
+  flex: 1;
+}
+.cause-tag {
+  font: 400 11px/1.4 var(--font-sans);
+  color: var(--error-text);
+  background: var(--error-bg);
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin-left: 8px;
+}
+/* One line of the message, so two cards of one exception class differ. */
+.group-msg {
+  font: 400 11px/1.4 var(--font-mono);
+  color: var(--muted);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .group-title .mono { font-weight: 500; }
 .group-sub {
