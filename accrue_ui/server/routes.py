@@ -229,8 +229,10 @@ async def post_retry(request: Request, run: str | None = None) -> JSONResponse:
 
     409 covers every way retry can be off the table — the server was
     launched without a usable ``--pipeline``, one retry is already in
-    flight (only ever one at a time), or *run* is not the latest run in
-    the file. Accepted retries run in the background; watch ``/api/run``
+    flight (only ever one at a time), *run* is not the latest run in the
+    file, or its manifest says checkpointing was off, so there is no
+    checkpoint to resume from. Accepted retries run in the background;
+    watch ``/api/run``
     and the SSE stream for the cells healing.
     """
     index = _index(request, run)

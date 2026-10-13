@@ -251,7 +251,7 @@ function pollUntilRetryDone() {
   }, RETRY_POLL_MS);
 }
 
-// body: {rows:[...]} | {group:{step,type}} | {all:true}. `source` tags which
+// body: {rows:[...]} | {group:{step,type,key}} | {all:true}. `source` tags which
 // button asked, so the error renders next to that one.
 export async function postRetry(body, source) {
   if (retryBusy()) return false;
