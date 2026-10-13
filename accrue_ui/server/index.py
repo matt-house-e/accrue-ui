@@ -275,11 +275,6 @@ class RunIndex:
         self._dirty_cells: dict[tuple[int, int], int] = {}  # (row, step) -> state
         self._dirty_steps: set[str] = set()
         self._sent_stats: dict[str, Any] = {}  # stats as of the last drain
-        #: Set when this index replaced a truncate-and-regrown one (a tail
-        #: generation bump, see app._follow): the next delta carries
-        #: ``reset: true`` so clients drop their stale grid and refetch the
-        #: whole snapshot rather than only gap-refetching out-of-grid indices.
-        self._reset_pending = False
 
     # ------------------------------------------------------------------ dims
 
@@ -1109,18 +1104,6 @@ class RunIndex:
 
     # ---------------------------------------------------------------- deltas
 
-    def mark_reset(self) -> None:
-        """Flag the next delta as a reset (truncate-and-regrow reindex).
-
-        Called by the follower when the tail's generation bumped and it built
-        a fresh index over the new file. The next :meth:`drain_delta` then
-        carries ``reset: true`` — the signal a client uses to drop its stale
-        grid and refetch the whole snapshot, since cells that existed only in
-        the old file are in-grid (not gap-detectable) and would otherwise keep
-        their stale bytes.
-        """
-        self._reset_pending = True
-
     def drain_delta(self) -> dict[str, Any] | None:
         """Collect all changes since the last drain into one SSE delta payload.
 
@@ -1132,9 +1115,10 @@ class RunIndex:
         ``run.live`` — so the progress bar and the LIVE badge track a live run
         without refetching). The payload is state, not a journal — draining
         resets the accumulators, so memory stays bounded by the grid size no
-        matter how fast the log grows. Returns None when nothing changed
-        (unless a reset is pending, which always emits). Shape:
-        docs/api-shapes.md, ``GET /api/events``.
+        matter how fast the log grows. Returns None when nothing changed.
+        It never carries ``reset``: a rebuild or a new run concerns every
+        client of every run, so :func:`app._flush_deltas` sends that itself.
+        Shape: docs/api-shapes.md, ``GET /api/events``.
         """
         cells = [
             [row, step_i, state] for (row, step_i), state in self._dirty_cells.items()
@@ -1157,23 +1141,17 @@ class RunIndex:
             for k, v in stats.items()
             if k not in self._sent_stats or self._sent_stats[k] != v
         }
-        reset = self._reset_pending
-        if not cells and not steps and not changed_stats and not reset:
+        if not cells and not steps and not changed_stats:
             return None
         self._dirty_cells.clear()
         self._dirty_steps.clear()
         self._sent_stats = stats
-        self._reset_pending = False
-        delta: dict[str, Any] = {
+        return {
             "t": round(self._elapsed_s(), 3),
             "cells": cells,
             "stats": changed_stats,
             "steps": steps,
         }
-        if reset:
-            # Absent means false (backward-compatible); present only when set.
-            delta["reset"] = True
-        return delta
 
     def _throughput_per_min(self) -> float | None:
         """Completions per minute over the recent window, or None if unknowable.

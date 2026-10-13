@@ -21,7 +21,7 @@ from accrue_ui.server.events import (
     DeltaBroadcaster,
     merge_deltas,
 )
-from accrue_ui.server.index import RunIndex
+from accrue_ui.server.index import RunIndex, RunLog
 from accrue_ui.server.tail import TailRecord
 from tests.conftest import TOKEN, SSEStream, age_file, lifespan_ctx, row, write_log
 
@@ -101,7 +101,7 @@ def test_first_drain_primes_stats_then_none():
         "rows_done",  # delta-only mirror of the snapshot's rows.done
         "live",  # delta-only mirror of run.live (mtime recency)
     }
-    # A first drain with no reset pending carries no reset key (absent=false).
+    # A run's deltas carry no reset key (absent=false); see _flush_deltas.
     assert "reset" not in first
     # ...and with no changes since, the next drain has nothing to say.
     assert index.drain_delta() is None
@@ -187,28 +187,19 @@ def _index_over(path: Path, records: list[dict]) -> RunIndex:
 # ---- reset flag (issue #11): truncate-and-regrow reindex ------------------
 
 
-def test_mark_reset_makes_the_next_delta_carry_reset_then_clears():
-    index = _index_for(_start_records())
-    index.drain_delta()  # prime the baseline; no reset pending yet
-    index.apply(TailRecord(0, 1, row("fetch", 0, 1.0)))
+def test_mark_reset_is_a_one_shot_the_coalescer_consumes():
+    """A rebuild flags the run log, not a run: the coalescer reads the flag
+    once and sends every client a reset, whichever run it shows."""
+    runs = RunLog(Path("unused.jsonl"))
+    for record in _start_records():
+        runs.apply(TailRecord(0, 1, record))
+    assert runs.take_runs_changed() is False  # the first run is not "new"
 
-    index.mark_reset()
-    delta = index.drain_delta()
-    assert delta is not None
-    assert delta["reset"] is True
-    # It is a one-shot: the following delta does not repeat it.
-    index.apply(TailRecord(0, 1, row("fetch", 1, 1.1)))
-    assert "reset" not in index.drain_delta()
-
-
-def test_reset_emits_even_with_no_other_change():
-    """A truncate to a bare pipeline_start must still tell clients to refetch."""
-    index = _index_for(_start_records())
-    index.drain_delta()  # prime; nothing dirty now
-    index.mark_reset()
-    delta = index.drain_delta()  # no cells/steps/stats changed
-    assert delta is not None
-    assert delta["reset"] is True
+    runs.mark_reset()
+    assert runs.take_runs_changed() is True
+    assert runs.take_runs_changed() is False
+    # A run's own deltas never carry it; _flush_deltas sends it separately.
+    assert "reset" not in runs.latest.drain_delta()
 
 
 def test_merge_deltas_preserves_a_reset_flag():

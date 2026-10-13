@@ -3,9 +3,9 @@
 ``create_app(run_path, *, token, port=None, allow_origin=None, pipeline=None,
 data=None, prices=None)`` builds the whole read path: security middleware,
 the API routes, a background follower that keeps the shared RunLog (one
-RunIndex per run in the file) current, a coalescer that flushes SSE deltas at most every 100ms, and the
-static frontend mounted at ``/`` (after the API routes, so ``/api/*`` always
-wins).
+RunIndex per run in the file) current, a coalescer that flushes SSE deltas
+at most every 100ms, and the static frontend mounted at ``/`` (after the API
+routes, so ``/api/*`` always wins).
 
 ``port`` is the port the server will bind. It is part of the app's identity,
 not just the runner's: the Origin check compares the *whole* origin
