@@ -268,6 +268,23 @@ def test_prices_file_overrides_a_built_in_field_by_field(tmp_path: Path):
     assert PRICES["claude-sonnet-4-6"].input == pytest.approx(3.0)
 
 
+def test_prices_file_override_by_a_gateway_or_snapshot_spelling(tmp_path: Path):
+    """An id lookup() resolves to a built-in is built in, not a new model."""
+    table = load_prices(
+        _prices_file(
+            tmp_path,
+            '["anthropic/claude-sonnet-4.6"]\ninput = 3.3\n'
+            '["claude-sonnet-4-5-20250929"]\noutput = 16.0\n',
+        )
+    )
+    # merged onto claude-sonnet-4-6 / claude-sonnet-4-5, omitted fields kept
+    assert table["anthropic/claude-sonnet-4.6"] == pytest.approx((3.3, 15.0, 0.3, 3.75))
+    assert table["claude-sonnet-4-5-20250929"] == pytest.approx((3.0, 16.0, 0.3, 3.75))
+    # the exact spelling wins at lookup; the canonical id keeps the built-in
+    assert lookup("anthropic/claude-sonnet-4.6", table).input == pytest.approx(3.3)
+    assert lookup("claude-sonnet-4-6", table) == PRICES["claude-sonnet-4-6"]
+
+
 def test_prices_file_adds_a_model_with_default_cache_rates(tmp_path: Path):
     table = load_prices(
         _prices_file(

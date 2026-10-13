@@ -163,8 +163,10 @@ def load_prices(
         cache_read = 0.30    # optional
         cache_write = 3.75   # optional; 5-minute writes
 
-    A field left out keeps the built-in entry's value. A model with no
-    built-in entry needs ``input`` and ``output``; its cache prices default
+    A field left out keeps the built-in entry's value — found by
+    :func:`lookup`, so gateway and snapshot spellings of a built-in id count
+    as built in. A model with no built-in entry needs ``input`` and
+    ``output``; its cache prices default
     to Anthropic's standard multipliers of ``input``. Anything else — an
     unknown field, a negative or non-numeric price — raises
     :class:`PricesError` rather than quietly mispricing the run.
@@ -198,7 +200,10 @@ def load_prices(
                 or value < 0
             ):
                 raise PricesError(f"{model!r}: {key} must be a non-negative number")
-        known = merged.get(model)
+        # Resolve the base the way a run's model id is priced, so an override
+        # keyed "anthropic/claude-sonnet-4.6" or by a dated snapshot merges
+        # onto the built-in entry instead of counting as an unknown model.
+        known = lookup(model, merged)
         if known is not None:
             fields = known._asdict()
         else:
