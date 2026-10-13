@@ -349,10 +349,10 @@ async def test_rebuilt_index_keeps_the_prices_table(tmp_path: Path):
         second[0] = {**second[0], "run_id": "second-run"}
         await asyncio.to_thread(write_log, log, second)
         for _ in range(200):
-            if app.state.index.run_id == "second-run":
+            if app.state.runs.latest.run_id == "second-run":
                 break
             await asyncio.sleep(0.02)
-        index = app.state.index
+        index = app.state.runs.latest
         assert index.run_id == "second-run"
         assert index.prices is app.state.prices
         assert index.snapshot()["stats"]["spend"] == pytest.approx(0.022)

@@ -67,6 +67,8 @@ MAX_CELL_EVENTS = 50
 #: seek-by-offset design exists to avoid.
 MAX_PROMPT_BODY_BYTES = 16 * 1024 * 1024
 SCHEMA_V = 1
+#: ``retry.reason`` for a run that is not the latest in its file.
+RETRY_NOT_LATEST = "retry re-runs the latest run in this file; switch to it to retry"
 #: Prompt/response capture sidecar written beside the run log, the same rule
 #: accrue's ``prompt_sidecar_path`` uses: ``<run>.jsonl`` -> ``<run>.prompts.jsonl``.
 PROMPT_SIDECAR_SUFFIX = ".prompts.jsonl"
@@ -207,8 +209,13 @@ class RunIndex:
         path: str | Path,
         retry: RetryController | None = None,
         prices: Mapping[str, ModelPrice] | None = None,
+        fallback_id: str | None = None,
     ):
         self.path = Path(path)
+        #: What this run is called when its log never names it (no
+        #: ``pipeline_start``, or one without a ``run_id``). The file's stem
+        #: for a one-run file; :class:`RunLog` numbers later runs.
+        self._fallback_id = fallback_id or self.path.stem
         #: Model -> price; the built-in table unless ``--prices`` changed it.
         self.prices = prices if prices is not None else PRICES
         #: Prompt sidecar beside the run log — ``<run>.prompts.jsonl``. Present
@@ -232,6 +239,19 @@ class RunIndex:
         self.finished = False
         self.final_elapsed_s: float | None = None
         self.last_t = 0.0
+        #: The log-time of this run's ``pipeline_start``. accrue keeps ``t``
+        #: running across runs appended to one file, so a second run's records
+        #: start well past zero; every elapsed figure is measured from here.
+        self._t0 = 0.0
+        self._started = False  # a pipeline_start has been applied
+        #: Is this the run the newest records belong to? Only that run can be
+        #: live — the file's mtime says nothing about a run that ended before
+        #: the next one was appended (see RunLog).
+        self.writing = True
+        #: A later run follows this one in the same file. Retry re-runs the
+        #: launched ``--pipeline``/``--data``, which belong to the latest run,
+        #: so it is off the table here.
+        self.superseded = False
 
         self._steps: list[StepState] = []
         self._step_idx: dict[str, int] = {}
@@ -364,8 +384,22 @@ class RunIndex:
             self._in_retry = False
         # Unknown record types are ignored (v1 contract: additive changes).
 
+    @property
+    def id(self) -> str:
+        """The run's id: ``pipeline_start.run_id``, else the fallback name."""
+        return self.run_id or self._fallback_id
+
+    @property
+    def started(self) -> bool:
+        """Has this index applied a ``pipeline_start`` yet?"""
+        return self._started
+
     def _apply_pipeline_start(self, data: dict[str, Any]) -> None:
         self.run_id = data.get("run_id") or self.run_id
+        t = data.get("t")
+        if not self._started and isinstance(t, (int, float)):
+            self._t0 = float(t)
+        self._started = True
         self.display_key = data.get("display_key")
         v = data.get("v")
         if isinstance(v, int):
@@ -778,11 +812,11 @@ class RunIndex:
     def _iso(self, t: float | None) -> str | None:
         if t is None or self.started_at is None:
             return None
-        return _iso_utc(self.started_at + timedelta(seconds=t))
+        return _iso_utc(self.started_at + timedelta(seconds=t - self._t0))
 
     def run_meta(self) -> dict[str, Any]:
         return {
-            "id": self.run_id or self.path.stem,
+            "id": self.id,
             "name": self.path.stem,
             "started_at": _iso_utc(self.started_at) if self.started_at else None,
             "live": self.is_live(),
@@ -797,7 +831,12 @@ class RunIndex:
         three days ago has no pipeline_end and never will, and pulsing LIVE
         at it forever is a lie the whole UI then builds on (a climbing
         elapsed clock, an ETA, a throughput number).
+
+        A run that a later one in the same file has taken over from is not
+        live either: the writes keeping the mtime fresh are not its own.
         """
+        if not self.writing:
+            return False
         try:
             mtime = os.stat(self.path).st_mtime
         except OSError:
@@ -813,7 +852,7 @@ class RunIndex:
             return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
         # Interrupted and long cold: the run lasted until its last record,
         # not until now.
-        return self.last_t
+        return max(0.0, self.last_t - self._t0)
 
     def _stats_block(self, cost: dict[str, Any]) -> dict[str, Any]:
         """The ``/api/run`` "stats" object; *cost* comes from _cost_block()."""
@@ -878,8 +917,15 @@ class RunIndex:
         }
 
     def retry_block(self) -> dict[str, Any]:
-        """``/api/run``'s retry block — availability comes from the controller."""
-        return self.retry.block()
+        """``/api/run``'s retry block — availability comes from the controller.
+
+        A superseded run (a later one shares its file) reports retry
+        unavailable whatever the controller says: see :attr:`superseded`.
+        """
+        block = self.retry.block()
+        if self.superseded:
+            return {**block, "available": False, "reason": RETRY_NOT_LATEST}
+        return block
 
     def overview_block(
         self, by_step_cost: dict[str, float] | None = None
@@ -1142,7 +1188,7 @@ class RunIndex:
         ts = self._completion_ts
         if not ts:
             return None
-        window = min(THROUGHPUT_WINDOW_S, ts[-1])
+        window = min(THROUGHPUT_WINDOW_S, ts[-1] - self._t0)
         if window < THROUGHPUT_MIN_WINDOW_S:
             return None
         # The deque holds exactly the window (trimmed on append), so its
@@ -1483,6 +1529,129 @@ class RunIndex:
         except (json.JSONDecodeError, ValueError):
             return None
         return body if isinstance(body, dict) else None
+
+
+class RunLog:
+    """Every run in one log file, each in its own :class:`RunIndex`.
+
+    accrue appends: a rerun pointed at the same output path opens a second
+    ``pipeline_start`` … ``pipeline_end`` frame with its own ``run_id`` in the
+    same file (accrue-ui#33). Fed to one index, the two runs' tokens summed,
+    their attempts mixed in each cell, and the header named only one of them.
+    Here each ``pipeline_start`` with a ``run_id`` no run has yet opens a new
+    index, and every record goes to the run it belongs to:
+
+    - ``pipeline_start`` → its run (a new one, or the run already holding
+      that ``run_id``);
+    - ``retry_start`` → the run its ``run_id`` names, falling back to the
+      latest — a retry segment keeps the healed run's id, so a retry of run 1
+      appended after run 2 still heals run 1;
+    - anything else → the run being written, i.e. whichever of the two
+      above came last.
+
+    A one-run file is one index, exactly as before.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        retry: RetryController | None = None,
+        prices: Mapping[str, ModelPrice] | None = None,
+    ):
+        self.path = Path(path)
+        self._retry = retry if retry is not None else RetryController(path)
+        self._prices = prices
+        self.runs: list[RunIndex] = []
+        self._writing = self._open_run()
+        #: A run was appended (or the log rebuilt) since the last
+        #: :meth:`take_runs_changed`: every client, whichever run it shows,
+        #: has a stale run list and must refetch.
+        self._runs_changed = False
+
+    def _open_run(self) -> RunIndex:
+        n = len(self.runs)
+        index = RunIndex(
+            self.path,
+            retry=self._retry,
+            prices=self._prices,
+            fallback_id=self.path.stem if n == 0 else f"{self.path.stem}-{n + 1}",
+        )
+        for earlier in self.runs:
+            earlier.superseded = True
+        self.runs.append(index)
+        return index
+
+    @property
+    def latest(self) -> RunIndex:
+        return self.runs[-1]
+
+    def get(self, run_id: str | None = None) -> RunIndex | None:
+        """The run called *run_id* (``None``: the latest), or None if absent."""
+        if run_id is None:
+            return self.latest
+        for index in self.runs:
+            if index.id == run_id:
+                return index
+        return None
+
+    def _named(self, run_id: Any) -> RunIndex | None:
+        """The run whose log named it *run_id* (fallback ids never match)."""
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        for index in self.runs:
+            if index.run_id == run_id:
+                return index
+        return None
+
+    def apply(self, record: TailRecord) -> None:
+        rtype = record.data.get("type")
+        if rtype == "pipeline_start":
+            target = self._named(record.data.get("run_id"))
+            if target is None and not self.latest.started:
+                # The index no pipeline_start has claimed yet is the one this
+                # frame opens; only a second frame opens another.
+                target = self.latest
+            if target is None:
+                target = self._open_run()
+                self._runs_changed = True
+            self._write_to(target)
+        elif rtype == "retry_start":
+            self._write_to(self._named(record.data.get("run_id")) or self.latest)
+        self._writing.apply(record)
+
+    def _write_to(self, index: RunIndex) -> None:
+        if index is self._writing:
+            return
+        self._writing.writing = False
+        index.writing = True
+        self._writing = index
+
+    def mark_reset(self) -> None:
+        """Flag a rebuild (truncate-and-regrow): every client refetches."""
+        self._runs_changed = True
+
+    def take_runs_changed(self) -> bool:
+        """Consume the "runs changed" flag (see :meth:`mark_reset`)."""
+        changed, self._runs_changed = self._runs_changed, False
+        return changed
+
+    def snapshot(self, index: RunIndex) -> dict[str, Any]:
+        """*index*'s ``/api/run`` snapshot plus the file's run list."""
+        return {**index.snapshot(), "file_runs": self.runs_block()}
+
+    def runs_block(self) -> list[dict[str, Any]]:
+        """The runs this file holds, newest first (``/api/run``'s ``file_runs``)."""
+        latest = self.latest
+        return [
+            {
+                "id": index.id,
+                "started_at": _iso_utc(index.started_at) if index.started_at else None,
+                "finished": index.finished,
+                "live": index.is_live(),
+                "latest": index is latest,
+            }
+            for index in reversed(self.runs)
+        ]
 
 
 # ------------------------------------------------------------------- helpers
