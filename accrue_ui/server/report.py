@@ -331,9 +331,14 @@ def _int(value: Any) -> str:
 
 
 def _money(value: Any) -> str:
+    # Same rule as the dashboard's fmtMoney (static/lib/fmt.js), so an export
+    # shows the Cost tab's exact figures: a sub-cent amount keeps 4 decimals
+    # rather than rounding to a "$0.00" that reads as nothing priced.
     if value is None or not isinstance(value, (int, float)):
         return DASH
-    return f"${value:,.2f}"
+    amount = abs(value)
+    digits = 4 if 0 < amount < 0.01 else 2
+    return f"{'−' if value < 0 else ''}${amount:.{digits}f}"
 
 
 def _pct(value: Any) -> str:
