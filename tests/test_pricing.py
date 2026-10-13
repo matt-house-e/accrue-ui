@@ -216,9 +216,9 @@ def test_amana_batch_log_prices_from_step_end_at_the_batch_discount():
 def test_unknown_model_is_named_not_dashed():
     snap = _index(_amana_log("acme-contracts-9")).snapshot()
     assert snap["stats"]["spend"] is None
+    # Only the LLM step's model: the function step (model null, no tokens)
+    # never counts as unpriced.
     assert snap["stats"]["unpriced"] == ["acme-contracts-9"]
-    # The function step spent no tokens and has no model: never "unpriced".
-    assert "calculate" not in snap["stats"]["unpriced"]
 
 
 def test_partly_priced_run_still_names_the_unpriced_model():
