@@ -1,10 +1,10 @@
 """Command-line entry point for accrue-ui.
 
 ``accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr]
-[--prices file.toml] [--port 7607] [--no-browser]`` resolves the run log (explicit path, else the newest
-``*.jsonl`` under ``./.accrue/runs``, capture sidecars skipped), generates a
-fresh URL-safe launch token, builds the server app, **binds the loopback
-port**, and only then
+[--prices file.toml] [--port 7607] [--no-browser]`` resolves the run log
+(explicit path, else the newest ``*.jsonl`` under ``./.accrue/runs``,
+capture sidecars skipped), generates a fresh URL-safe launch token, builds
+the server app, **binds the loopback port**, and only then
 prints the tokenized URL and opens the browser — uvicorn serves on the
 socket already in hand, bound to **127.0.0.1 only**, hardcoded, no flag to
 widen it (see ``server/security.py`` for the threat model).
