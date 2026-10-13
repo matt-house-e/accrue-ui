@@ -17,11 +17,14 @@ to whatever process got there first (see :func:`bind_loopback`).
 factory) is what makes retry possible; see ``server/retry.py`` for the
 accepted shapes. Run the command from the directory the pipeline itself ran
 in — the one holding ``.accrue/`` — so the retry finds the same checkpoint.
+That directory also goes on ``sys.path`` (see :func:`cwd_on_path`), so
+``--pipeline enrich:target`` finds a plain ``./enrich.py``.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import secrets
 import socket
 import sys
@@ -113,6 +116,20 @@ def newest_run_log(runs_dir: Path = RUNS_DIR) -> Path | None:
     return max(logs, key=lambda p: p.stat().st_mtime, default=None)
 
 
+def cwd_on_path() -> None:
+    """Put the working directory at the front of ``sys.path``, once.
+
+    ``python -m`` does this; a console script does not — its ``sys.path[0]``
+    is the script's ``bin/`` — so after a plain ``pip install`` / ``uvx``,
+    ``--pipeline enrich:target`` could not import ``./enrich.py`` unless the
+    shell happened to set ``PYTHONPATH`` (accrue-ui#44). Front, not back, so
+    the user's file beats an installed distribution of the same name.
+    """
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
+
 def make_server(app: FastAPI, port: int) -> uvicorn.Server:
     """A uvicorn server bound to loopback; programmatic so tests can drive it."""
     config = uvicorn.Config(app, host=HOST, port=port, log_level="warning")
@@ -161,6 +178,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         run_log = found
+
+    # Only when asked to import user code: otherwise a stray pandas.py in
+    # cwd would gain the power to shadow a lazy import for nothing.
+    if args.pipeline is not None or args.data is not None:
+        cwd_on_path()
 
     token = secrets.token_urlsafe(32)
     # The specs are imported during app startup, not here: a bad --pipeline

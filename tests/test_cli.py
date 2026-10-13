@@ -99,6 +99,8 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict:
         calls["order"].append("browser")
         calls["browser"].append(url)
 
+    # main() may prepend cwd to sys.path; give each test its own copy.
+    monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setattr(cli, "create_app", spy_create_app)
     monkeypatch.setattr(cli, "make_server", fake_make_server)
     monkeypatch.setattr(cli, "bind_loopback", fake_bind)
@@ -298,6 +300,59 @@ def test_pipeline_and_data_specs_reach_the_retry_controller(
     controller = captured["app"].state.retry
     assert (controller.pipeline_spec, controller.data_spec) == (None, None)
     assert controller.reason == "launched without --pipeline"
+
+
+ENRICH_PY = """
+class Pipeline:
+    async def retry_failed_async(self, data, config=None):
+        return None
+
+
+def target():
+    return Pipeline(), [{"company": "Acme"}]
+"""
+
+
+def test_pipeline_imports_a_module_from_the_working_directory(
+    run_log: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    captured: dict,
+):
+    """`--pipeline enrich:target` finds ./enrich.py with no PYTHONPATH (#44).
+
+    A console script's sys.path[0] is its bin/ dir, not cwd; strip every
+    entry that names cwd to reproduce that clean environment.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "enrich.py").write_text(ENRICH_PY)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        sys, "path", [p for p in sys.path if p not in ("", ".", str(project))]
+    )
+    request.addfinalizer(lambda: sys.modules.pop("enrich", None))
+
+    argv = [str(run_log), "--no-browser", "--pipeline", "enrich:target"]
+    assert cli.main(argv) == 0
+    controller = captured["app"].state.retry
+    assert controller.available is True, controller.reason
+
+    # Once: a second launch in the same process adds no duplicate entry.
+    assert cli.main(argv) == 0
+    assert sys.path.count(str(project)) == 1
+    assert sys.path[0] == str(project)
+
+
+def test_cwd_stays_off_sys_path_without_pipeline(
+    run_log: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured: dict
+):
+    """No --pipeline/--data, no user code to import: sys.path is untouched."""
+    monkeypatch.chdir(tmp_path)
+    before = list(sys.path)
+    assert cli.main([str(run_log), "--no-browser"]) == 0
+    assert sys.path == before
 
 
 def test_prices_file_reaches_the_app(run_log: Path, captured: dict, tmp_path: Path):
