@@ -16,7 +16,9 @@ fetched, so the file stays offline-clean).
 from __future__ import annotations
 
 import html
+import math
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -362,11 +364,17 @@ def _money(value: Any) -> str:
     # Same rule as the dashboard's fmtMoney (static/lib/fmt.js), so an export
     # shows the Cost tab's exact figures: a sub-cent amount keeps 4 decimals
     # rather than rounding to a "$0.00" that reads as nothing priced.
-    if value is None or not isinstance(value, (int, float)):
+    # json.loads accepts NaN/Infinity in a log's usage.cost; neither is a
+    # figure, and Decimal(inf).quantize would raise and fail the download.
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
         return DASH
     amount = abs(value)
     digits = 4 if 0 < amount < 0.01 else 2
-    return f"{'−' if value < 0 else ''}${amount:.{digits}f}"
+    # toFixed rounds an exact binary tie up (0.125 -> "0.13"); Python's
+    # float format rounds it to even ("0.12"). Decimal(float) is the exact
+    # binary value, so ROUND_HALF_UP on it is toFixed's rule.
+    fixed = Decimal(amount).quantize(Decimal(1).scaleb(-digits), ROUND_HALF_UP)
+    return f"{'−' if value < 0 else ''}${fixed}"
 
 
 def _unpriced_text(models: list[str]) -> str:

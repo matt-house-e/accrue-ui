@@ -184,7 +184,12 @@ def test_money_matches_the_dashboards_fmt_money():
     assert _money(0) == "$0.00"
     assert _money(1234.5) == "$1234.50"
     assert _money(-0.004) == "−$0.0040"
+    # An exact binary tie rounds up, as toFixed does, not to even.
+    assert _money(0.125) == "$0.13"
+    assert _money(0.625) == "$0.63"
     assert _money(None) == "—"
+    assert _money(float("inf")) == "—"
+    assert _money(float("nan")) == "—"
 
 
 def test_report_cost_matches_the_cost_tab_for_a_built_in_price(tmp_path: Path):
