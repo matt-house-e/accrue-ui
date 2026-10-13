@@ -294,6 +294,25 @@ def test_only_the_run_being_written_is_live(tmp_path: Path):
     assert [r["live"] for r in latest["file_runs"]] == [True, False]
 
 
+def test_the_run_menu_names_the_served_file_by_the_run_the_header_shows(
+    tmp_path: Path,
+):
+    # The file's first record is run A's pipeline_start; the header shows B.
+    log = _write(tmp_path / "run.jsonl", RUN_A, RUN_B)
+    other = _run(
+        "other", t0=0.0, started_at="2026-10-12T09:00:00Z", nrows=1, failing=set()
+    )
+    _write(tmp_path / "other.jsonl", other)
+    with client_for(log) as client:
+        header = client.get("/api/run").json()["run"]
+        listed = {r["name"]: r for r in client.get("/api/runs").json()["runs"]}
+
+    assert listed["run"]["id"] == header["id"] == "run-b"
+    assert listed["run"]["started_at"] == header["started_at"]
+    # A sibling log is still read from its first record.
+    assert listed["other"]["id"] == "other"
+
+
 def test_a_one_run_file_lists_one_run(tmp_path: Path):
     log = _write(tmp_path / "run.jsonl", RUN_A)
     with client_for(log) as client:

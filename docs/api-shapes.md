@@ -584,6 +584,11 @@ Known run logs, newest first.
 Clients should show `name / id` only when they differ, and the id alone
 otherwise.
 
+Other logs are listed by their first `pipeline_start`. The served log is
+listed by its **latest** run (`id`, `started_at`), matching `/api/run`'s
+`run` with no `?run=`, because a file holding several runs has more than one
+`pipeline_start`.
+
 ## `GET /api/report`
 
 A **self-contained static HTML report** of the served run, for handing a

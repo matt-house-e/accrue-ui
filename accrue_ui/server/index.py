@@ -1744,12 +1744,20 @@ def _burst_hint(count: int, first_t: float, last_t: float) -> str | None:
     )
 
 
-def scan_runs(directory: str | Path) -> list[dict[str, Any]]:
-    """List known run logs in *directory*, newest first (for /api/runs)."""
+def scan_runs(
+    directory: str | Path, served: RunLog | None = None
+) -> list[dict[str, Any]]:
+    """List known run logs in *directory*, newest first (for /api/runs).
+
+    A log's first record names only its first run. The *served* log may
+    hold several (accrue-ui#33), so it is listed under its latest run — the
+    one the header shows — read from the index already in memory.
+    """
     directory = Path(directory)
     runs = []
     if not directory.is_dir():
         return runs
+    served_path = served.path.resolve() if served is not None else None
     for path in directory.glob("*.jsonl"):
         # `<run>.prompts.jsonl` capture sidecars live right beside their run
         # log and match the glob; they are not runs (accrue-ui#27).
@@ -1759,13 +1767,18 @@ def scan_runs(directory: str | Path) -> list[dict[str, Any]]:
             st = path.stat()
         except OSError:
             continue
-        first = _read_first_record(path)
         started_at = None
         run_id = path.stem
-        if first and first.get("type") == "pipeline_start":
-            run_id = first.get("run_id") or run_id
-            parsed = _parse_iso(first.get("started_at"))
-            started_at = _iso_utc(parsed) if parsed else None
+        if served is not None and path.resolve() == served_path:
+            latest = served.latest
+            run_id = latest.id
+            started_at = _iso_utc(latest.started_at) if latest.started_at else None
+        else:
+            first = _read_first_record(path)
+            if first and first.get("type") == "pipeline_start":
+                run_id = first.get("run_id") or run_id
+                parsed = _parse_iso(first.get("started_at"))
+                started_at = _iso_utc(parsed) if parsed else None
         # Live means "being written to right now" — same rule as
         # RunIndex.is_live(), and for the same reason (an interrupted run
         # has no pipeline_end and is not live because of it).

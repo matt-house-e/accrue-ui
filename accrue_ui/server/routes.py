@@ -72,7 +72,8 @@ async def get_cell(
 @router.get("/runs")
 async def get_runs(request: Request) -> dict:
     """Known run logs (siblings of the served log), newest first."""
-    return {"runs": scan_runs(request.app.state.run_path.parent)}
+    runs: RunLog = request.app.state.runs
+    return {"runs": scan_runs(request.app.state.run_path.parent, served=runs)}
 
 
 @router.get("/report")
