@@ -112,7 +112,7 @@ function GroupCard({ group, expanded, onToggle, retry }) {
         html`<span
           class="cause-tag tip"
           data-tip="Not transient: a retry re-sends the identical request"
-          >fails again</span
+          ><span class="tip-label">fails again</span></span
         >`}
         <div class="group-msg">${group.message}</div>
         <div class="group-sub">
