@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from accrue_ui.server.index import RunIndex
-from accrue_ui.server.report import render_report, report_filename
+from accrue_ui.server.report import _money, render_report, report_filename
 from accrue_ui.server.tail import TailRecord
 from tests.conftest import age_file, client_for, row, write_log
 
@@ -160,3 +160,115 @@ def test_report_requires_the_launch_token(tmp_path: Path):
     with client_for(_log(tmp_path), authed=False) as client:
         resp = client.get("/api/report")
     assert resp.status_code == 401
+
+
+# ---- cost: the same figures as the Cost tab (issue #42) -------------------
+
+
+def _priced_log(tmp_path: Path, model: str) -> Path:
+    """The report fixture with every step on *model*."""
+    records = _report_records()
+    for step in records[0]["steps"]:
+        step["model"] = model
+    path = tmp_path / f"{model}.jsonl"
+    write_log(path, records)
+    age_file(path)
+    return path
+
+
+def test_money_matches_the_dashboards_fmt_money():
+    """report._money is fmtMoney (static/lib/fmt.js) ported to Python."""
+    assert _money(0.0028) == "$0.0028"  # sub-cent: 4 decimals, never "$0.00"
+    assert _money(0.009) == "$0.0090"
+    assert _money(0.01) == "$0.01"
+    assert _money(0) == "$0.00"
+    assert _money(1234.5) == "$1234.50"
+    assert _money(-0.004) == "−$0.0040"
+    # An exact binary tie rounds up, as toFixed does, not to even.
+    assert _money(0.125) == "$0.13"
+    assert _money(0.625) == "$0.63"
+    assert _money(None) == "—"
+    assert _money(float("inf")) == "—"
+    assert _money(float("nan")) == "—"
+
+
+def test_report_cost_matches_the_cost_tab_for_a_built_in_price(tmp_path: Path):
+    """A model the built-in table prices exports with the snapshot's dollars."""
+    with client_for(_priced_log(tmp_path, "claude-sonnet-4-6")) as client:
+        snap = client.get("/api/run").json()
+        html_doc = client.get("/api/report").text
+    # 2 rows x (1000 in @ $3 + 100 out @ $15) per 1M tokens.
+    assert snap["stats"]["spend"] == 0.009
+    assert snap["cost"]["by_model"] == {"claude-sonnet-4-6": 0.009}
+    assert "No priced models" not in html_doc
+    # The Spend tile and the by-model bar read what the Cost tab's fmtMoney
+    # shows for 0.009, not a rounded "$0.00".
+    assert "<div class='k'>Spend</div><div class='v'>$0.0090</div>" in html_doc
+    assert "<span class='bar-val'>$0.0090</span>" in html_doc
+
+
+def test_report_cost_matches_the_cost_tab_with_a_prices_file(tmp_path: Path):
+    """--prices reaches the export: a model only the file prices has a cost."""
+    prices = tmp_path / "prices.toml"
+    prices.write_text('["gpt-5.2"]\ninput = 1.0\noutput = 4.0\n')
+    with client_for(_priced_log(tmp_path, "gpt-5.2"), prices=prices) as client:
+        snap = client.get("/api/run").json()
+        html_doc = client.get("/api/report").text
+    # 2 rows x (1000 in @ $1 + 100 out @ $4) per 1M tokens.
+    assert snap["cost"]["by_model"] == {"gpt-5.2": 0.0028}
+    assert "No priced models" not in html_doc
+    assert "<div class='k'>Spend</div><div class='v'>$0.0028</div>" in html_doc
+    assert "<span class='bar-val'>$0.0028</span>" in html_doc
+
+
+def test_report_names_an_unpriced_model_like_the_cost_tab(tmp_path: Path):
+    """A model with no price is named with the --prices hint, not "—"."""
+    with client_for(_log(tmp_path)) as client:  # gpt-5.2: not in the table
+        snap = client.get("/api/run").json()
+        html_doc = client.get("/api/report").text
+    assert snap["stats"]["unpriced"] == ["gpt-5.2"]
+    assert "No priced models" not in html_doc
+    assert (
+        "<div class='k'>Spend</div>"
+        "<div class='v unpriced'>no price for gpt-5.2</div>" in html_doc
+    )
+    assert "<span class='bar-val'>no price</span>" in html_doc
+    assert "supply one with --prices &lt;file.toml&gt;" in html_doc
+
+
+def test_report_lists_the_unpriced_model_of_a_partly_priced_run(tmp_path: Path):
+    """The priced model's bar keeps its dollars; the other reads "no price"."""
+    records = _report_records()
+    records[0]["steps"][0]["model"] = "claude-sonnet-4-6"
+    records.insert(
+        -1,
+        row("score", 0, 1.5, usage={"in": 500, "out": 50, "cost": None}),
+    )
+    path = tmp_path / "partly.jsonl"
+    write_log(path, records)
+    age_file(path)
+    with client_for(path) as client:
+        snap = client.get("/api/run").json()
+        html_doc = client.get("/api/report").text
+    assert snap["cost"]["by_model"] == {"claude-sonnet-4-6": 0.009}
+    assert snap["stats"]["unpriced"] == ["gpt-5.2"]
+    assert "<div class='k'>Spend</div><div class='v'>$0.0090</div>" in html_doc
+    assert "<span class='bar-val'>$0.0090</span>" in html_doc
+    assert (
+        "<div class='bar-row unpriced'><span class='lbl mono'>gpt-5.2</span>"
+        in html_doc
+    )
+
+
+def test_report_says_no_priced_models_only_when_no_model_spent(tmp_path: Path):
+    """Function steps (model null) price to nothing and name nothing."""
+    records = _report_records()
+    for step in records[0]["steps"]:
+        step["model"] = None
+    path = tmp_path / "functions.jsonl"
+    write_log(path, records)
+    age_file(path)
+    with client_for(path) as client:
+        html_doc = client.get("/api/report").text
+    assert "No priced models in this run." in html_doc
+    assert "no price for" not in html_doc
