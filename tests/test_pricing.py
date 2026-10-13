@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
+from accrue_ui.server.app import create_app
 from accrue_ui.server.index import RunIndex
 from accrue_ui.server.pricing import (
     BATCH_DISCOUNT,
     PRICES,
     ModelPrice,
+    PricesError,
+    load_prices,
     lookup,
     price_usd,
 )
 from accrue_ui.server.tail import TailRecord
-from tests.conftest import row
+from tests.conftest import TOKEN, client_for, lifespan_ctx, row, write_log
 
 CURRENT_CLAUDE = [
     "claude-fable-5-1",
@@ -244,3 +248,94 @@ def test_unpriced_rides_the_sse_delta():
     assert index.drain_delta()["stats"]["unpriced"] == []
     index.apply(TailRecord(0, 1, records[2]))  # first row with usage
     assert index.drain_delta()["stats"]["unpriced"] == ["acme-9"]
+
+
+# ---- --prices: a TOML file adds to or overrides the built-in table ---------
+
+
+def _prices_file(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "prices.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_prices_file_overrides_a_built_in_field_by_field(tmp_path: Path):
+    table = load_prices(_prices_file(tmp_path, '["claude-sonnet-4-6"]\ninput = 6.0\n'))
+    # input replaced; output and the cache prices keep the built-in values
+    assert table["claude-sonnet-4-6"] == pytest.approx((6.0, 15.0, 0.30, 3.75))
+    # every other entry untouched, and the built-in table never mutated
+    assert table["claude-haiku-4-5"] == PRICES["claude-haiku-4-5"]
+    assert PRICES["claude-sonnet-4-6"].input == pytest.approx(3.0)
+
+
+def test_prices_file_adds_a_model_with_default_cache_rates(tmp_path: Path):
+    table = load_prices(
+        _prices_file(
+            tmp_path,
+            '["house-llm-2"]\ninput = 2\noutput = 8\n'
+            '["house-llm.3"]\ninput = 1.0\noutput = 4.0\ncache_read = 0.05\n',
+        )
+    )
+    assert table["house-llm-2"] == pytest.approx((2.0, 8.0, 0.2, 2.5))
+    # a quoted key keeps its dot instead of nesting
+    assert table["house-llm.3"] == pytest.approx((1.0, 4.0, 0.05, 1.25))
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ('["house-llm"]\ninput = 2.0\n', "needs output"),
+        ('["house-llm"]\nprice = 2.0\n', "unknown field 'price'"),
+        ('["claude-sonnet-4-6"]\ninput = -1\n', "non-negative number"),
+        ('["claude-sonnet-4-6"]\ninput = "3"\n', "non-negative number"),
+        ('["claude-sonnet-4-6"]\ninput = true\n', "non-negative number"),
+        ('["claude-sonnet-4-6"]\ninput = nan\n', "non-negative number"),
+        ("claude-sonnet-4-6 = 3.0\n", "must be a table"),
+        ("[unclosed\n", "not valid TOML"),
+    ],
+)
+def test_bad_prices_files_are_rejected_with_the_reason(
+    tmp_path: Path, text: str, message: str
+):
+    with pytest.raises(PricesError, match=message):
+        load_prices(_prices_file(tmp_path, text))
+
+
+def test_missing_prices_file_is_a_prices_error(tmp_path: Path):
+    with pytest.raises(PricesError, match="cannot read"):
+        load_prices(tmp_path / "nope.toml")
+
+
+def test_prices_override_reaches_the_snapshot(tmp_path: Path):
+    log = tmp_path / "run.jsonl"
+    write_log(log, _amana_log("claude-sonnet-4-6"))
+    prices = _prices_file(
+        tmp_path,
+        '["claude-sonnet-4-6"]\ninput = 6.0\noutput = 30.0\n'
+        '["acme-9"]\ninput = 1.0\noutput = 1.0\n',
+    )
+    with client_for(log, prices=prices) as client:
+        body = client.get("/api/run").json()
+    # double the built-in $0.09
+    assert body["stats"]["spend"] == pytest.approx(0.18)
+    assert body["retry"]["resume_command"].endswith(f"--prices {prices}")
+
+
+async def test_rebuilt_index_keeps_the_prices_table(tmp_path: Path):
+    """A truncated-and-rewritten log rebuilds the index; --prices survives."""
+    log = tmp_path / "run.jsonl"
+    write_log(log, _amana_log("house-llm"))
+    prices = _prices_file(tmp_path, '["house-llm"]\ninput = 1.0\noutput = 1.0\n')
+    app = create_app(log, token=TOKEN, prices=prices)
+    async with lifespan_ctx(app):
+        second = _amana_log("house-llm")
+        second[0] = {**second[0], "run_id": "second-run"}
+        await asyncio.to_thread(write_log, log, second)
+        for _ in range(200):
+            if app.state.index.run_id == "second-run":
+                break
+            await asyncio.sleep(0.02)
+        index = app.state.index
+        assert index.run_id == "second-run"
+        assert index.prices is app.state.prices
+        assert index.snapshot()["stats"]["spend"] == pytest.approx(0.022)

@@ -4,7 +4,9 @@ The run log's ``usage.cost`` is always null in schema v1 — accrue core
 deliberately ships no pricing data — so accrue-ui prices tokens itself from
 the small table below. The values are **indicative list prices**, easy to
 edit, and will drift; a future accrue emitter may start writing real dollar
-amounts into ``usage.cost``, which the index prefers over this table.
+amounts into ``usage.cost``, which the index prefers over this table. A
+launch can add or override entries with ``--prices file.toml``
+(:func:`load_prices`).
 
 Unknown models (and function steps, where ``model`` is null) price to
 ``None``: their dollars are omitted upstream, and when nothing prices, the
@@ -13,9 +15,17 @@ UI's spend figures are null rather than a misleading zero.
 
 from __future__ import annotations
 
+import math
 import re
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import NamedTuple
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - Python 3.10 only
+    import tomli as tomllib
 
 
 class ModelPrice(NamedTuple):
@@ -133,3 +143,75 @@ def price_usd(
         + cache_write * price.cache_write
     ) / 1_000_000
     return usd * BATCH_DISCOUNT if batch else usd
+
+
+class PricesError(ValueError):
+    """A ``--prices`` file that cannot be used; the message says why."""
+
+
+def load_prices(
+    path: str | Path, base: Mapping[str, ModelPrice] = PRICES
+) -> dict[str, ModelPrice]:
+    """*base* with a ``--prices`` TOML file's entries merged over it.
+
+    One table per model id, prices in USD per 1M tokens (quote the id —
+    TOML would read its dots as nesting)::
+
+        ["claude-sonnet-4-6"]
+        input = 3.00
+        output = 15.00
+        cache_read = 0.30    # optional
+        cache_write = 3.75   # optional; 5-minute writes
+
+    A field left out keeps the built-in entry's value. A model with no
+    built-in entry needs ``input`` and ``output``; its cache prices default
+    to Anthropic's standard multipliers of ``input``. Anything else — an
+    unknown field, a negative or non-numeric price — raises
+    :class:`PricesError` rather than quietly mispricing the run.
+    """
+    path = Path(path)
+    try:
+        with path.open("rb") as fh:
+            doc = tomllib.load(fh)
+    except OSError as exc:
+        raise PricesError(f"cannot read {path}: {exc.strerror or exc}") from None
+    except tomllib.TOMLDecodeError as exc:
+        raise PricesError(f"{path} is not valid TOML: {exc}") from None
+
+    merged = dict(base)
+    for model, entry in doc.items():
+        if not isinstance(entry, dict):
+            raise PricesError(
+                f'{model!r} must be a table: ["{model}"] then input = …, output = …'
+            )
+        unknown = sorted(set(entry) - set(ModelPrice._fields))
+        if unknown:
+            raise PricesError(
+                f"{model!r}: unknown field {unknown[0]!r} "
+                f"(expected {', '.join(ModelPrice._fields)})"
+            )
+        for key, value in entry.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise PricesError(f"{model!r}: {key} must be a non-negative number")
+        known = merged.get(model)
+        if known is not None:
+            fields = known._asdict()
+        else:
+            missing = [k for k in ("input", "output") if k not in entry]
+            if missing:
+                raise PricesError(
+                    f"{model!r} has no built-in price, so it needs "
+                    + " and ".join(missing)
+                )
+            fields = {
+                "cache_read": entry["input"] * CACHE_READ_X,
+                "cache_write": entry["input"] * CACHE_WRITE_X,
+            }
+        fields.update({k: float(v) for k, v in entry.items()})
+        merged[model] = ModelPrice(**fields)
+    return merged

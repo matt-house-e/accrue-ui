@@ -300,6 +300,28 @@ def test_pipeline_and_data_specs_reach_the_retry_controller(
     assert controller.reason == "launched without --pipeline"
 
 
+def test_prices_file_reaches_the_app(run_log: Path, captured: dict, tmp_path: Path):
+    prices = tmp_path / "prices.toml"
+    prices.write_text('["house-llm"]\ninput = 1.0\noutput = 2.0\n')
+    assert cli.main([str(run_log), "--no-browser", "--prices", str(prices)]) == 0
+    assert captured["create_kwargs"]["prices"] == str(prices)
+    assert captured["app"].state.prices["house-llm"].output == 2.0
+
+
+def test_bad_prices_file_exits_1_before_binding(
+    run_log: Path, captured: dict, tmp_path: Path, capsys
+):
+    """A broken --prices stops the launch: no port, no token, a reason."""
+    prices = tmp_path / "prices.toml"
+    prices.write_text('["house-llm"]\ninput = 1.0\n')
+    assert cli.main([str(run_log), "--prices", str(prices)]) == 1
+    assert captured["order"] == []  # never bound, never opened a browser
+    io = capsys.readouterr()
+    assert "→" not in io.out
+    assert "accrue-ui: --prices:" in io.err
+    assert "needs output" in io.err
+
+
 # ---- the CLI-built app keeps the security posture -------------------------
 
 

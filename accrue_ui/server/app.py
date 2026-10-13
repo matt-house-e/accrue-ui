@@ -1,7 +1,7 @@
 """FastAPI app factory.
 
 ``create_app(run_path, *, token, port=None, allow_origin=None, pipeline=None,
-data=None)`` builds the whole read path: security middleware, the API routes,
+data=None, prices=None)`` builds the whole read path: security middleware, the API routes,
 a background follower that keeps the shared RunIndex current, a coalescer
 that flushes SSE deltas at most every 100ms, and the static frontend mounted
 at ``/`` (after the API routes, so ``/api/*`` always wins).
@@ -15,6 +15,11 @@ different loopback port is a different site — see ``security.py``.
 imported once during startup (see ``retry.py``); whatever happens — success
 or a precise failure reason — lands in ``/api/run``'s ``retry`` block, and
 the resolved objects are what ``POST /api/retry`` runs.
+
+``prices`` is the CLI's ``--prices`` TOML file. Unlike the retry specs it is
+loaded here, eagerly: a bad file raises :class:`PricesError` before the
+server exists, because a run silently priced from the wrong table is worse
+than one that refuses to start.
 
 Binding the server socket to 127.0.0.1 is the runner's job (``cli.py``);
 everything here assumes loopback-only exposure — see ``security.py``.
@@ -32,6 +37,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .events import FLUSH_INTERVAL_S, DeltaBroadcaster
 from .index import RunIndex
+from .pricing import PRICES, load_prices
 from .retry import RetryController
 from .routes import router
 from .security import install_security
@@ -56,7 +62,9 @@ async def _follow(app: FastAPI) -> None:
             # only in the old file are in-grid, so a client cannot gap-detect
             # them and must refetch the whole snapshot.
             generation = tail.generation
-            app.state.index = RunIndex(app.state.run_path, retry=app.state.retry)
+            app.state.index = RunIndex(
+                app.state.run_path, retry=app.state.retry, prices=app.state.prices
+            )
             app.state.index.mark_reset()
         for record in records:
             app.state.index.apply(record)
@@ -86,10 +94,12 @@ def create_app(
     allow_origin: str | None = None,
     pipeline: str | None = None,
     data: str | None = None,
+    prices: str | Path | None = None,
 ) -> FastAPI:
     """Build the accrue-ui server app for one run log."""
     run_path = Path(run_path)
-    retry = RetryController(run_path, pipeline, data)
+    table = load_prices(prices) if prices is not None else PRICES
+    retry = RetryController(run_path, pipeline, data, prices_path=prices)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -97,7 +107,7 @@ def create_app(
         # Import --pipeline/--data now so the first snapshot already knows
         # whether retry is on the table, and why not when it isn't.
         retry.resolve()
-        index = RunIndex(run_path, retry=retry)
+        index = RunIndex(run_path, retry=retry, prices=table)
         for record in tail.read_available():
             index.apply(record)
         # The initial backfill is the snapshot, not a delta: drain it away so
@@ -125,6 +135,7 @@ def create_app(
     # Set before startup so a caller can inspect the retry specs (and the
     # reason they failed to import) without running the lifespan.
     app.state.retry = retry
+    app.state.prices = table
     install_security(app, token=token, port=port, allow_origin=allow_origin)
     app.include_router(router)
     # Static frontend mounts last so /api/* is matched first.

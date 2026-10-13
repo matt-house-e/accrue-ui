@@ -141,7 +141,7 @@ Full snapshot of the run, including the complete cell-state array.
 ```
 
 `resume_command` is the actual command line that reproduces this server with
-retry enabled — including `--data` when the launch used it. When the server
+retry enabled — including `--data` and `--prices` when the launch used them. When the server
 was launched without `--pipeline` it carries the `<module:attr>` placeholder.
 
 The four dollar figures — `stats.spend`, `stats.cache_saved`, `cost.wasted`,
