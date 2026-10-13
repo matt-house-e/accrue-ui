@@ -11,6 +11,15 @@ is built issue-by-issue, so expect gaps — see
 
 ## Install
 
+To look at a run log without installing anything, use
+[uv](https://docs.astral.sh/uv/):
+
+```bash
+uvx --from accrue-ui accrue-ui .accrue/runs/2026-08-20a.jsonl
+```
+
+Or install it alongside accrue:
+
 ```bash
 pip install accrue-ui
 ```
@@ -28,11 +37,9 @@ dashboard:
 accrue watch .accrue/runs/2026-08-20a.jsonl
 ```
 
-From accrue 1.4.1 there is a one-line form that installs both:
-
-```bash
-pip install 'accrue[ui]'
-```
+`uvx` runs in a throwaway environment that can't import your pipeline, so
+for [retries](#retrying-failed-rows) use `pip install accrue-ui` in the
+environment your pipeline runs in.
 
 Requires Python 3.10+ and a run log — write one with
 `pipeline.run(..., run_log=True)`.
