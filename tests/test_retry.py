@@ -1167,3 +1167,30 @@ def test_post_retry_rejects_a_non_string_group_key(tmp_path: Path, write_module)
             headers=ORIGIN,
         )
     assert resp.status_code == 400
+
+
+def test_retry_is_off_with_a_reason_when_the_run_had_no_checkpoint(
+    tmp_path: Path, write_module
+):
+    log = _causes_log(tmp_path, checkpointing=False)
+    mod, client = _retry_client(log, write_module)
+    with client:
+        block = client.get("/api/run").json()["retry"]
+        resp = client.post("/api/retry", json={"all": True}, headers=ORIGIN)
+    assert block["available"] is False
+    assert "checkpointing off" in block["reason"]
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == block["reason"]
+    assert sys.modules[mod].CALLS == []
+
+
+@pytest.mark.parametrize("checkpointing", [True, None])
+def test_retry_stays_on_unless_the_manifest_says_no_checkpoint(
+    tmp_path: Path, write_module, checkpointing: bool | None
+):
+    log = _causes_log(tmp_path, checkpointing=checkpointing)
+    _mod, client = _retry_client(log, write_module)
+    with client:
+        block = client.get("/api/run").json()["retry"]
+    assert block["available"] is True
+    assert block["reason"] is None

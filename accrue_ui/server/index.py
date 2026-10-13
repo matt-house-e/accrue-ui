@@ -70,6 +70,12 @@ MAX_PROMPT_BODY_BYTES = 16 * 1024 * 1024
 SCHEMA_V = 1
 #: ``retry.reason`` for a run that is not the latest in its file.
 RETRY_NOT_LATEST = "retry re-runs the latest run in this file; switch to it to retry"
+#: ``retry.reason`` for a run whose manifest says checkpointing was off:
+#: ``retry_failed()`` resumes from the checkpoint, and there is none.
+RETRY_NO_CHECKPOINT = (
+    "this run had checkpointing off, so there is no checkpoint to retry from; "
+    "re-run it with checkpointing on"
+)
 #: Cap on an error group's normalised-message key. Past it the tail is
 #: usually row data (a validation error quoting the value), which would split
 #: one cause into a group per row.
@@ -938,12 +944,25 @@ class RunIndex:
         """``/api/run``'s retry block — availability comes from the controller.
 
         A superseded run (a later one shares its file) reports retry
-        unavailable whatever the controller says: see :attr:`superseded`.
+        unavailable whatever the controller says: see :attr:`superseded`. So
+        does a run the manifest says had checkpointing off — accrue's
+        ``retry_failed()`` raises without a checkpoint to resume from.
         """
         block = self.retry.block()
         if self.superseded:
             return {**block, "available": False, "reason": RETRY_NOT_LATEST}
+        if self._checkpointing_off():
+            return {**block, "available": False, "reason": RETRY_NO_CHECKPOINT}
         return block
+
+    def _checkpointing_off(self) -> bool:
+        """The manifest says the run wrote no checkpoint for retry to read.
+
+        Only an explicit ``false`` counts: a log without a manifest, or one
+        whose config could not say, leaves retry to the controller.
+        """
+        config = (self.manifest or {}).get("config")
+        return isinstance(config, dict) and config.get("checkpointing") is False
 
     def overview_block(
         self, by_step_cost: dict[str, float] | None = None
