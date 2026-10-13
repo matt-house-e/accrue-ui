@@ -159,8 +159,10 @@ def test_run_fixture_shape():
         assert set(group) == {
             "step",
             "type",
+            "key",
             "count",
             "message",
+            "retryable",
             "rows",
             "first_t",
             "last_t",
@@ -315,7 +317,7 @@ def test_retry_buttons_are_wired_to_the_endpoint():
     assert "postRetry({ all: true }" in triage.replace("\n", " ") or (
         "body=${{ all: true }}" in triage
     )
-    assert "group: { step: group.step, type: group.type }" in triage
+    assert "group: { step: group.step, type: group.type, key: group.key }" in triage
     assert "retryBusy()" in triage
 
     inspector = (STATIC / "views" / "inspector.js").read_text()
@@ -612,3 +614,24 @@ def test_api_events_streams_sse(stub_url):
         assert resp.headers["Content-Type"].startswith("text/event-stream")
         chunk = resp.read(64).decode()
     assert chunk.startswith("event: delta\ndata: ")
+
+
+def test_retrying_errors_that_fail_again_asks_first():
+    """A non-retryable group, Retry all over one, and a row in one all arm a
+    second-click confirm instead of posting straight away (#34)."""
+    triage = (STATIC / "views" / "triage.js").read_text()
+    assert "export function useRetryConfirm()" in triage
+    assert "confirm.click(warn, source, () => postRetry(body, source))" in triage
+    assert "warn=${failsAgain}" in triage
+    assert "warn=${groups.some((g) => g.retryable === false)}" in triage
+
+    inspector = (STATIC / "views" / "inspector.js").read_text()
+    assert "const warn = rowFailsAgain(sel.row);" in inspector
+    assert "confirm.click(warn, source" in inspector
+
+    store = (STATIC / "lib" / "store.js").read_text()
+    assert "export function rowFailsAgain(row)" in store
+
+    css = (STATIC / "style.css").read_text()
+    warn = css[css.index(".btn-warn {") :].split("}", 1)[0]
+    assert "var(--retry-bg)" in warn and "var(--retry-text)" in warn

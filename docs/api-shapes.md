@@ -114,12 +114,17 @@ Full snapshot of the run, including the complete cell-state array.
     "data": "<base64>"             // base64 of a row-major Uint8Array,
                                    // length rows*steps; byte at [row*steps + stepIndex]
   },
-  "error_groups": [                // one entry per (step, error type), worst first
+  "error_groups": [                // one entry per (step, error type, key), worst first
     {
       "step": "web_search",
       "type": "RateLimitError",
+      "key": "Rate limit reached for gpt-#-mini on tokens per minute (TPM): Limit #, ...",
+                                     // the message with ids/numbers as "#",
+                                     // ≤200 chars: one cause per key
       "count": 38,
       "message": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, ...",
+                                     // the first raw message of the group
+      "retryable": true,             // bool | null: will a plain retry help?
       "rows": [[1211, 1214], [1284, 1284]],  // inclusive row ranges, sorted
       "first_t": "2026-08-17T09:38:32Z",     // string | null: null when the
       "last_t": "2026-08-17T09:41:29Z",      // run has no parseable start
@@ -176,6 +181,20 @@ earlier run's `retry` block reads `available: false` with
 `reason: "retry re-runs the latest run in this file; switch to it to retry"`:
 the `--pipeline`/`--data` the server was launched with belong to the latest
 run.
+
+Error groups split one exception class by message: a max_tokens truncation
+and a 429 are both `LLMAPIError`, but they are separate causes. `retryable` is
+the run log's `error.retryable` (accrue ≥ 1.5.1) when it has one. For an older
+log, the known deterministic messages (max_tokens truncation, a schema too
+complex to compile, a request over the size limit) read `false`, and anything
+else reads `null`, meaning unknown. A `false` group's `hint` names what to
+change before a retry can help. The burst ("likely rate limiting") hint is
+given only to `true`/`null` groups on live steps, because a batch step's
+results all land when the batch does.
+
+A run whose manifest has `config.checkpointing: false` reports retry
+`available: false` with a reason, because `retry_failed()` resumes from a
+checkpoint the run never wrote.
 
 `resume_command` is the actual command line that reproduces this server with
 retry enabled — including `--data` and `--prices` when the launch used them. When the server
@@ -529,12 +548,13 @@ header needed. The body carries **exactly one** selector:
 
 ```jsonc
 { "rows": [1284, 1290] }                              // explicit row indices
-{ "group": { "step": "web_search", "type": "RateLimitError" } }  // one error group
+{ "group": { "step": "web_search", "type": "RateLimitError", "key": "Rate limit …" } }  // one error group
 { "all": true }                                       // every errored row
 ```
 
 A `group` selector is resolved against the snapshot's `error_groups` and also
-restricts the retry to that step; `rows` and `all` retry every failed step of
+restricts the retry to that step. Without `key` it selects every group of that
+step and type; `rows` and `all` retry every failed step of
 the rows named.
 
 `Content-Type: application/json` is **required** on every `/api/*` mutation.

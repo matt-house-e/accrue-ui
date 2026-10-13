@@ -9,11 +9,12 @@ import {
   closeInspector,
   postRetry,
   retryBusy,
+  rowFailsAgain,
   selection,
   showInternalFields,
   snapshot,
 } from "../lib/store.js";
-import { RetryNote } from "./triage.js";
+import { RetryNote, useRetryConfirm } from "./triage.js";
 
 const STATUS_BYTE = {
   pending: 0,
@@ -163,10 +164,14 @@ export function Inspector() {
   const loading = cellDetailLoading.value;
   const [tab, setTab] = useState("prompt");
   const [copied, setCopied] = useState(false);
+  const confirm = useRetryConfirm();
   if (!sel || !snap) return null;
 
   const step = snap.steps.find((s) => s.name === sel.step);
   const retry = snap.retry || { available: false, reason: null };
+  const source = `row:${sel.row}`;
+  const warn = rowFailsAgain(sel.row);
+  const armed = warn && confirm.isArmed(source);
 
   const copyResume = () => {
     if (!retry.resume_command || !navigator.clipboard) return;
@@ -256,17 +261,26 @@ export function Inspector() {
       </div>
       <div class="insp-body">${body}</div>
       <div class="insp-foot">
-        <${RetryNote} source=${`row:${sel.row}`} />
+        <${RetryNote} source=${source} />
         <span
           class=${retry.available ? "" : "tip"}
           data-tip=${retry.available ? null : retry.reason}
         >
           <button
-            class="btn btn-primary"
+            class=${`btn ${armed ? "btn-warn" : "btn-primary"}`}
             disabled=${!retry.available || retryBusy()}
-            onClick=${() => postRetry({ rows: [sel.row] }, `row:${sel.row}`)}
+            onClick=${() =>
+              confirm.click(warn, source, () =>
+                postRetry({ rows: [sel.row] }, source)
+              )}
+            onMouseLeave=${confirm.disarm}
+            onBlur=${confirm.disarm}
           >
-            ${retryBusy() ? "Retrying…" : "Retry this row"}
+            ${retryBusy()
+              ? "Retrying…"
+              : armed
+                ? "Fails again — retry anyway?"
+                : "Retry this row"}
           </button>
         </span>
         <button class="btn btn-secondary" onClick=${copyResume}>

@@ -98,8 +98,10 @@
     {
       "step": "web_search",
       "type": "RateLimitError",
+      "key": "Rate limit reached for gpt-#-mini on tokens per minute (TPM): Limit #, Used #, Requested #. Please try again in #ms.",
       "count": 38,
       "message": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, Used 1,998,432, Requested 5,214. Please try again in 6ms.",
+      "retryable": true,
       "rows": [
         [
           1211,
@@ -161,8 +163,10 @@
     {
       "step": "summarize",
       "type": "ValidationError",
+      "key": "# validation error for CompanySummary summary Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]",
       "count": 4,
       "message": "1 validation error for CompanySummary\nsummary\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]",
+      "retryable": false,
       "rows": [
         [
           2113,
@@ -207,13 +211,15 @@
         1,
         0
       ],
-      "hint": null
+      "hint": "These fail the same way on every retry — each one re-sends the identical request. Change the step, its schema or the input first."
     },
     {
       "step": "classify",
       "type": "APITimeoutError",
+      "key": "Request timed out.",
       "count": 1,
       "message": "Request timed out.",
+      "retryable": true,
       "rows": [
         [
           147,
