@@ -1760,7 +1760,7 @@ _NON_RETRYABLE: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: What to change before a retry can help, per non-transient kind.
 _FIX_HINTS = {
     "max_tokens": "Raise the step's max_tokens.",
-    "schema": ("Shrink the step's output schema, or split its fields across steps."),
+    "schema": "Shrink the step's output schema, or split its fields across steps.",
     "size": "Shrink or split the row's attachments.",
     None: "Change the step, its schema or the input first.",
 }
