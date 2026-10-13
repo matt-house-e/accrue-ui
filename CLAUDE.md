@@ -56,6 +56,10 @@ Backend lives in `accrue_ui/server/`:
   `num_rows` (or past 1,000,000 without one) are ignored, not grown into.
   **`live` is mtime recency only** — an interrupted run has no `pipeline_end`
   and must not pulse LIVE forever.
+  A file can hold **several runs** (accrue appends a rerun to the same path).
+  `RunLog` keeps one `RunIndex` per `run_id` and routes `retry_start` by its
+  `run_id`. Routes take `?run=<id>` and default to the latest. Never fold two
+  runs into one index.
 - **`events.py`** — SSE delta fan-out. Drop-and-coalesce: each client holds
   one mergeable pending payload (state, not a journal), flushed ≤10Hz.
 - **`retry.py`** — retry orchestration: imports `--pipeline`/`--data` once at

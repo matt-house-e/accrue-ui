@@ -336,6 +336,19 @@ def test_delta_reset_triggers_a_full_snapshot_refetch():
     assert "return;" in reset_region
 
 
+def test_the_event_stream_follows_a_selection_the_store_changes():
+    """A rewrite that drops the pinned run makes loadRun() follow the latest
+    (accrue-ui#33). The open stream must be reopened for it: left on the
+    vanished run's ?run=, it carries only resets and the page freezes."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    fallback = store.split("export async function loadRun", 1)[1].split("}", 1)[0]
+    assert "selectedRun.value = null" in fallback
+    sse = (STATIC / "lib" / "sse.js").read_text()
+    assert "sourceRun = selectedRun.value" in sse.split("export function connect", 1)[1]
+    reopen = sse.split("selectedRun.subscribe(", 1)[1]
+    assert "disconnect();\n    connect();" in reopen
+
+
 def test_delta_live_clears_the_badge_and_stops_the_ticker():
     """live is a delta-only stat that drives run.live, which app.js reads for
     both the LIVE badge and the elapsed ticker."""

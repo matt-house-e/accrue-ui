@@ -120,7 +120,7 @@ async def lifespan_ctx(app: Any):
 class SSEStream:
     """One open GET /api/events connection; parses frames as they arrive."""
 
-    def __init__(self, app: Any, token: str = TOKEN):
+    def __init__(self, app: Any, token: str = TOKEN, query: str = ""):
         self.status: int | None = None
         self.headers: dict[str, str] = {}
         self.chunks: list[bytes] = []
@@ -135,7 +135,7 @@ class SSEStream:
             "method": "GET",
             "path": "/api/events",
             "raw_path": b"/api/events",
-            "query_string": b"",
+            "query_string": query.encode(),
             "root_path": "",
             "scheme": "http",
             "headers": [(b"host", b"localhost"), (b"x-accrue-token", token.encode())],

@@ -2,10 +2,10 @@
 
 ``create_app(run_path, *, token, port=None, allow_origin=None, pipeline=None,
 data=None, prices=None)`` builds the whole read path: security middleware,
-the API routes, a background follower that keeps the shared RunIndex
-current, a coalescer that flushes SSE deltas at most every 100ms, and the
-static frontend mounted at ``/`` (after the API routes, so ``/api/*`` always
-wins).
+the API routes, a background follower that keeps the shared RunLog (one
+RunIndex per run in the file) current, a coalescer that flushes SSE deltas
+at most every 100ms, and the static frontend mounted at ``/`` (after the API
+routes, so ``/api/*`` always wins).
 
 ``port`` is the port the server will bind. It is part of the app's identity,
 not just the runner's: the Origin check compares the *whole* origin
@@ -37,7 +37,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .events import FLUSH_INTERVAL_S, DeltaBroadcaster
-from .index import RunIndex
+from .index import RunLog
 from .pricing import PRICES, load_prices
 from .retry import RetryController
 from .routes import router
@@ -48,27 +48,27 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 async def _follow(app: FastAPI) -> None:
-    """Feed appended records into the index; rebuild it on truncation."""
+    """Feed appended records into the run log; rebuild it on truncation."""
     tail: Tail = app.state.tail
     generation = tail.generation
     while True:
         records = await asyncio.to_thread(tail.read_available)
         if tail.generation != generation:
             # The log was truncated or replaced: offsets and derived state
-            # are stale, so start a fresh index. read_available() already
+            # are stale, so start a fresh run log. read_available() already
             # returned records from the start of the new file. Re-applying
             # marks everything dirty again, so connected SSE clients converge
-            # on the new file's state at the next flush. The fresh index is
+            # on the new file's state at the next flush. The fresh log is
             # flagged so that flush carries reset:true — cells that existed
             # only in the old file are in-grid, so a client cannot gap-detect
             # them and must refetch the whole snapshot.
             generation = tail.generation
-            app.state.index = RunIndex(
+            app.state.runs = RunLog(
                 app.state.run_path, retry=app.state.retry, prices=app.state.prices
             )
-            app.state.index.mark_reset()
+            app.state.runs.mark_reset()
         for record in records:
-            app.state.index.apply(record)
+            app.state.runs.apply(record)
         if not records:
             await asyncio.sleep(tail.poll_interval)
 
@@ -77,14 +77,35 @@ async def _flush_deltas(app: FastAPI) -> None:
     """Coalescer: drain accumulated changes at most every FLUSH_INTERVAL_S.
 
     The sleep-first loop bounds the delta rate at ≤10Hz no matter how fast
-    the follower applies records; between flushes the RunIndex keeps
+    the follower applies records; between flushes each RunIndex keeps
     coalescing (latest cell state wins), so nothing queues unboundedly.
+
+    Each run's delta goes to the clients showing that run: those pinned to
+    it by id, plus — for the latest run — the clients following the latest
+    (``app.state.broadcaster``). A new run appearing, or the log being
+    rebuilt, sends every client a ``reset`` first: the run list each of them
+    holds is stale, and a latest-follower's latest run has changed.
     """
     while True:
         await asyncio.sleep(FLUSH_INTERVAL_S)
-        delta = app.state.index.drain_delta()
-        if delta is not None:
-            app.state.broadcaster.publish(delta)
+        runs: RunLog = app.state.runs
+        pinned: dict[str, DeltaBroadcaster] = app.state.run_broadcasters
+        if runs.take_runs_changed():
+            for broadcaster in (app.state.broadcaster, *pinned.values()):
+                broadcaster.publish(_reset_delta())
+        for index in runs.runs:
+            delta = index.drain_delta()
+            if delta is None:
+                continue
+            if index.id in pinned:
+                pinned[index.id].publish(delta)
+            if index is runs.latest:
+                app.state.broadcaster.publish(delta)
+
+
+def _reset_delta() -> dict:
+    """An otherwise empty delta telling a client to refetch its snapshot."""
+    return {"t": 0.0, "cells": [], "stats": {}, "steps": [], "reset": True}
 
 
 def create_app(
@@ -108,16 +129,21 @@ def create_app(
         # Import --pipeline/--data now so the first snapshot already knows
         # whether retry is on the table, and why not when it isn't.
         retry.resolve()
-        index = RunIndex(run_path, retry=retry, prices=table)
+        runs = RunLog(run_path, retry=retry, prices=table)
         for record in tail.read_available():
-            index.apply(record)
+            runs.apply(record)
         # The initial backfill is the snapshot, not a delta: drain it away so
         # the first SSE flush only carries changes made after startup.
-        index.drain_delta()
+        for index in runs.runs:
+            index.drain_delta()
+        runs.take_runs_changed()
         app.state.run_path = run_path
         app.state.tail = tail
-        app.state.index = index
+        app.state.runs = runs
+        # Clients following the file's latest run; ``run_broadcasters`` holds
+        # one per run id a client has pinned with ``/api/events?run=``.
         app.state.broadcaster = DeltaBroadcaster()
+        app.state.run_broadcasters = {}
         tasks = [
             asyncio.create_task(_follow(app)),
             asyncio.create_task(_flush_deltas(app)),

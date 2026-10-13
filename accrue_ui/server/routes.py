@@ -1,4 +1,9 @@
-"""API routes. All read from the shared RunIndex wired into app state.
+"""API routes. All read from the shared RunLog wired into app state.
+
+A log file can hold several runs (accrue appends a rerun to the same path —
+accrue-ui#33), each indexed on its own. Every run-scoped route takes an
+optional ``?run=<id>``: absent, it serves the latest run in the file; an id
+the file does not hold is a 404.
 
 Response shapes follow the frontend lane's ``docs/api-shapes.md`` (v0.1
 contract). ``GET /api/events`` streams live coalesced deltas (≤10Hz — the
@@ -20,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .events import DeltaBroadcaster
-from .index import RunIndex, scan_runs
+from .index import RunIndex, RunLog, scan_runs
 from .report import render_report, report_filename
 from .retry import ALREADY_RUNNING, RetryController
 
@@ -30,26 +35,35 @@ VALUES_MAX_COUNT = 1000
 router = APIRouter(prefix="/api")
 
 
-def _index(request: Request) -> RunIndex:
-    return request.app.state.index
+def _index(request: Request, run: str | None) -> RunIndex:
+    """The run *run* names (``None``: the latest), or a 404."""
+    index = request.app.state.runs.get(run)
+    if index is None:
+        raise HTTPException(status_code=404, detail=f"no run {run!r} in this log")
+    return index
 
 
 @router.get("/run")
-async def get_run(request: Request) -> dict:
+async def get_run(request: Request, run: str | None = None) -> dict:
     """Full snapshot of the run, including the complete cell-state array."""
-    return _index(request).snapshot()
+    runs: RunLog = request.app.state.runs
+    return runs.snapshot(_index(request, run))
 
 
 @router.get("/values")
-async def get_values(request: Request, start: int = 0, count: int = 50) -> dict:
+async def get_values(
+    request: Request, start: int = 0, count: int = 50, run: str | None = None
+) -> dict:
     """Windowed row values for the data render mode; clamped to log bounds."""
-    return _index(request).values_window(start, min(count, VALUES_MAX_COUNT))
+    return _index(request, run).values_window(start, min(count, VALUES_MAX_COUNT))
 
 
 @router.get("/cell/{step}/{row}")
-async def get_cell(request: Request, step: str, row: int) -> dict:
+async def get_cell(
+    request: Request, step: str, row: int, run: str | None = None
+) -> dict:
     """One cell's full detail for the inspector, raw log records included."""
-    detail = _index(request).cell_detail(step, row)
+    detail = _index(request, run).cell_detail(step, row)
     if detail is None:
         raise HTTPException(status_code=404, detail=f"no cell {step}/{row}")
     return detail
@@ -58,11 +72,12 @@ async def get_cell(request: Request, step: str, row: int) -> dict:
 @router.get("/runs")
 async def get_runs(request: Request) -> dict:
     """Known run logs (siblings of the served log), newest first."""
-    return {"runs": scan_runs(request.app.state.run_path.parent)}
+    runs: RunLog = request.app.state.runs
+    return {"runs": scan_runs(request.app.state.run_path.parent, served=runs)}
 
 
 @router.get("/report")
-async def get_report(request: Request) -> HTMLResponse:
+async def get_report(request: Request, run: str | None = None) -> HTMLResponse:
     """Self-contained HTML report of the served run, as a file download.
 
     Rendered from the same in-memory RunIndex the dashboard holds (see
@@ -72,7 +87,7 @@ async def get_report(request: Request) -> HTMLResponse:
     navigating. This route lives under ``/api/*``, so the launch-token +
     Origin/Host middleware guards it exactly like every other API route.
     """
-    index = _index(request)
+    index = _index(request, run)
     document = render_report(index)
     filename = report_filename(index)
     return HTMLResponse(
@@ -85,15 +100,24 @@ async def get_report(request: Request) -> HTMLResponse:
 
 
 @router.get("/events")
-async def get_events(request: Request) -> StreamingResponse:
+async def get_events(request: Request, run: str | None = None) -> StreamingResponse:
     """SSE stream of live coalesced deltas (shape: docs/api-shapes.md).
 
     The coalescer in ``app.py`` publishes at most every 100ms; between
     deltas, keepalive comments flow so proxies and clients see a live
     connection. A slow client's unread payload is merged, not queued —
     see ``events.py`` for the drop-and-coalesce semantics.
+
+    Without ``?run=`` the stream follows the latest run in the file, through
+    a new one appearing; with it, the stream carries that run's deltas only.
     """
-    broadcaster: DeltaBroadcaster = request.app.state.broadcaster
+    if run is None:
+        broadcaster: DeltaBroadcaster = request.app.state.broadcaster
+    else:
+        _index(request, run)  # 404 for a run the file does not hold
+        broadcaster = request.app.state.run_broadcasters.setdefault(
+            run, DeltaBroadcaster()
+        )
 
     async def stream() -> AsyncIterator[bytes]:
         client = broadcaster.register()
@@ -191,17 +215,18 @@ def _selected_rows(body: Any, index: RunIndex) -> list[int]:
 
 
 @router.post("/retry")
-async def post_retry(request: Request) -> JSONResponse:
+async def post_retry(request: Request, run: str | None = None) -> JSONResponse:
     """Re-run failed cells: 202 with the row count, or 409 with the reason.
 
-    409 covers both ways retry can be off the table — the server was
-    launched without a usable ``--pipeline``, or one retry is already in
-    flight (only ever one at a time). Accepted retries run in the
-    background; watch ``/api/run`` and the SSE stream for the cells healing.
+    409 covers every way retry can be off the table — the server was
+    launched without a usable ``--pipeline``, one retry is already in
+    flight (only ever one at a time), or *run* is not the latest run in
+    the file. Accepted retries run in the background; watch ``/api/run``
+    and the SSE stream for the cells healing.
     """
-    index = _index(request)
+    index = _index(request, run)
     controller: RetryController = request.app.state.retry
-    block = controller.block()
+    block = index.retry_block()
     if not block["available"]:
         return JSONResponse(block, status_code=409)
 
@@ -219,7 +244,7 @@ async def post_retry(request: Request) -> JSONResponse:
         # request.json()` yielded, so its `running` may predate the retry
         # that is now refusing us. The reason and the state must agree.
         return JSONResponse(
-            {**controller.block(), "reason": ALREADY_RUNNING}, status_code=409
+            {**index.retry_block(), "reason": ALREADY_RUNNING}, status_code=409
         )
     return JSONResponse({"accepted": len(rows)}, status_code=202)
 
