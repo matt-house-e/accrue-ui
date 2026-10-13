@@ -184,6 +184,37 @@ button:disabled { cursor: not-allowed; }
 .run-menu-item:hover { background: var(--hover); color: var(--ink); }
 .run-menu-item .live-dot { margin-left: auto; }
 .spacer { flex: 1; }
+
+/* One log file, several runs (accrue-ui#33): which one is on screen. */
+.runs-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-1);
+  background: var(--component);
+  font: 400 12px/1.4 var(--font-sans);
+  color: var(--muted);
+}
+.runs-banner strong { color: var(--ink); font-weight: 600; }
+.runs-banner .dim { color: var(--faint-2); margin-left: 8px; }
+.runs-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  color: var(--faint-2);
+}
+.runs-picker select {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: 400 12px/1 var(--font-mono);
+  color: var(--ink);
+}
+.runs-picker select:hover { background: var(--hover); }
 .live-badge {
   display: flex;
   align-items: center;

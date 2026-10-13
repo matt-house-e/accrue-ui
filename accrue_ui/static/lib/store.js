@@ -41,6 +41,10 @@ export const elapsedS = signal(0); // ticks locally while run.live
 export const retryPending = signal(false); // POST in flight, before the poll
 export const retryError = signal(null); // {source, message} | null, shown inline
 export const errorGroupsStale = signal(false); // a refetch is on its way
+// The run the picker pinned, by id, when the log file holds several (a rerun
+// appended to the same path, accrue-ui#33). null follows the file's latest
+// run — through a new one appearing — which is what a one-run file always is.
+export const selectedRun = signal(null);
 
 // Row-values cache: rowIndex -> {row, key, cells}. Insertion-ordered Map
 // gives us LRU-ish eviction at the cap.
@@ -106,6 +110,15 @@ export function errorGroupFor(stepName, row) {
 
 // ---- fetch helpers ------------------------------------------------------
 
+// `path` scoped to the selected run: every run-scoped /api/* route takes an
+// optional ?run=<id>, and leaving it off means the latest run.
+export function apiPath(path) {
+  const run = selectedRun.value;
+  if (run == null) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}run=${encodeURIComponent(run)}`;
+}
+
 function decodeCells(cells) {
   const bin = atob(cells.data);
   const arr = new Uint8Array(bin.length);
@@ -114,16 +127,33 @@ function decodeCells(cells) {
 }
 
 export async function loadRun() {
-  const res = await fetch("/api/run");
+  const res = await fetch(apiPath("/api/run"));
+  if (res.status === 404 && selectedRun.value != null) {
+    // The pinned run is gone (the log was rewritten): follow the latest.
+    selectedRun.value = null;
+    return loadRun();
+  }
   if (!res.ok) throw new Error(`GET /api/run -> ${res.status}`);
   const data = await res.json();
   const cells = data.cells;
+  const prev = snapshot.value;
   batch(() => {
+    if (prev && prev.run.id !== data.run.id) forgetRun();
     snapshot.value = data;
     cellStates.value = decodeCells(cells);
     cellsVersion.value++;
     elapsedS.value = data.run.elapsed_s || 0;
   });
+}
+
+// Drop everything that belonged to the run on screen: another run (picked,
+// or a new latest one) is replacing it, and its rows share indices with it.
+function forgetRun() {
+  valuesCache.clear();
+  valuesVersion.value++;
+  selection.value = null;
+  cellDetail.value = null;
+  retryError.value = null;
 }
 
 const pendingWindows = new Set();
@@ -133,7 +163,7 @@ export async function loadValues(start, count) {
   if (pendingWindows.has(key)) return;
   pendingWindows.add(key);
   try {
-    const res = await fetch(`/api/values?start=${start}&count=${count}`);
+    const res = await fetch(apiPath(`/api/values?start=${start}&count=${count}`));
     if (!res.ok) return;
     const data = await res.json();
     for (const row of data.rows || []) {
@@ -155,7 +185,9 @@ export async function loadCell(stepName, row) {
   cellDetailLoading.value = true;
   cellDetail.value = null;
   try {
-    const res = await fetch(`/api/cell/${encodeURIComponent(stepName)}/${row}`);
+    const res = await fetch(
+      apiPath(`/api/cell/${encodeURIComponent(stepName)}/${row}`)
+    );
     cellDetail.value = res.ok ? await res.json() : null;
   } catch {
     cellDetail.value = null;
@@ -215,7 +247,7 @@ export async function postRetry(body, source) {
   retryError.value = null;
   let res;
   try {
-    res = await fetch("/api/retry", {
+    res = await fetch(apiPath("/api/retry"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

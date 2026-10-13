@@ -2,7 +2,7 @@
 // store (shape: docs/api-shapes.md). Degrades gracefully when the endpoint
 // is unreachable (dev stub gone, server stopped): it stops retrying after a
 // few consecutive failures and the footer shows "SSE idle".
-import { applyDelta, sseStatus } from "./store.js";
+import { apiPath, applyDelta, sseStatus } from "./store.js";
 
 let source = null;
 let failures = 0;
@@ -11,7 +11,8 @@ const MAX_FAILURES = 3;
 export function connect() {
   if (source || typeof EventSource === "undefined") return;
   try {
-    source = new EventSource("/api/events");
+    // Scoped like every fetch: the selected run's deltas, or the latest's.
+    source = new EventSource(apiPath("/api/events"));
   } catch {
     sseStatus.value = "idle";
     return;
@@ -42,5 +43,6 @@ export function disconnect() {
     source.close();
     source = null;
   }
+  failures = 0;
   sseStatus.value = "idle";
 }

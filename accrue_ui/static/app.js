@@ -11,16 +11,18 @@ import {
   fmtUnpriced,
   unpricedTip,
 } from "./lib/fmt.js";
-import { connect } from "./lib/sse.js";
+import { connect, disconnect } from "./lib/sse.js";
 import { initTooltips } from "./lib/tooltip.js";
 import {
   activeTab,
+  apiPath,
   closeInspector,
   elapsedS,
   loadRun,
   loadRuns,
   rowFilter,
   searchQuery,
+  selectedRun,
   selection,
   showInternalFields,
   snapshot,
@@ -82,7 +84,7 @@ function RunChip({ run }) {
 // than navigating away from the dashboard.
 function exportReport() {
   const a = document.createElement("a");
-  a.href = "/api/report";
+  a.href = apiPath("/api/report");
   a.rel = "noopener";
   document.body.appendChild(a);
   a.click();
@@ -109,6 +111,58 @@ function TopBar({ snap }) {
     </span>`}
     <span class="elapsed">${fmtDuration(elapsedS.value)}</span>
   </header>`;
+}
+
+// Pin the picked run — or follow the latest again — and reload: every fetch
+// and the event stream are scoped to the selected run, so the stream is
+// reopened for it rather than left delivering the old run's deltas.
+async function switchRun(run) {
+  disconnect();
+  selectedRun.value = run.latest ? null : run.id;
+  try {
+    await loadRun();
+  } finally {
+    connect();
+  }
+}
+
+// "2026-10-13T11:00:00Z" -> "2026-10-13 11:00 UTC"
+function fmtStarted(iso) {
+  const m = iso && String(iso).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+  return m ? `${m[1]} ${m[2]} UTC` : null;
+}
+
+function runOption(run) {
+  const started = fmtStarted(run.started_at);
+  return [run.id, started && `started ${started}`, run.latest && "latest"]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+// A rerun pointed at the same output path appends to the same log file
+// (accrue-ui#33). The server indexes each run on its own; say so, and let
+// the reader switch between them. The latest is shown until they pick one.
+function RunsBanner({ snap }) {
+  const runs = snap.file_runs || [];
+  if (runs.length < 2) return null;
+  const onChange = (e) => {
+    const run = runs.find((r) => r.id === e.target.value);
+    if (run) switchRun(run);
+  };
+  return html`<div class="runs-banner" role="status">
+    <span class="runs-banner-text">
+      This file holds <strong>${runs.length} runs</strong>.
+      <span class="dim">Totals, cells and errors are for the selected run only.</span>
+    </span>
+    <label class="runs-picker">
+      Showing
+      <select value=${snap.run.id} onChange=${onChange}>
+        ${runs.map(
+          (r) => html`<option key=${r.id} value=${r.id}>${runOption(r)}</option>`
+        )}
+      </select>
+    </label>
+  </div>`;
 }
 
 // Rendered wherever a number is genuinely unknown, never a bare blank and
@@ -326,6 +380,7 @@ function App() {
   const tab = activeTab.value;
   return html`<div class="app-root">
     <${TopBar} snap=${snap} />
+    <${RunsBanner} snap=${snap} />
     <${TabRow} snap=${snap} />
     <${StatsStrip} snap=${snap} />
     ${tab === "grid" && html`<${Grid} />`}
