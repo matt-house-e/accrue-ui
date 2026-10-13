@@ -163,7 +163,7 @@
     {
       "step": "summarize",
       "type": "ValidationError",
-      "key": "# validation error for CompanySummary summary Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]",
+      "key": "# validation error for CompanySummary summary Input should be a valid string [type=string_type, input_value=#, input_type=NoneType]",
       "count": 4,
       "message": "1 validation error for CompanySummary\nsummary\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]",
       "retryable": false,

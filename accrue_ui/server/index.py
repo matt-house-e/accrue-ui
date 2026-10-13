@@ -77,8 +77,8 @@ RETRY_NO_CHECKPOINT = (
     "re-run it with checkpointing on"
 )
 #: Cap on an error group's normalised-message key. Past it the tail is
-#: usually row data (a validation error quoting the value), which would split
-#: one cause into a group per row.
+#: usually row data (an error quoting the row's input), which would split one
+#: cause into a group per row.
 GROUP_KEY_MAX_CHARS = 200
 #: Prompt/response capture sidecar written beside the run log, the same rule
 #: accrue's ``prompt_sidecar_path`` uses: ``<run>.jsonl`` -> ``<run>.prompts.jsonl``.
@@ -1708,15 +1708,21 @@ _UUID_RE = re.compile(
 _ID_RE = re.compile(r"\b(?=\w*\d)(?=\w*[a-z])\w{8,}\b", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 _SPACE_RE = re.compile(r"\s+")
+#: pydantic's quote of the value that failed validation — for an exhausted
+#: parse retry, the model's output for that row. It sits well inside the
+#: key cap, so left in it would give every distinct output its own group.
+_INPUT_VALUE_RE = re.compile(r"input_value=.*?, input_type=")
 
 
 def _normalise_message(msg: str) -> str:
     """A failure message with the parts that vary per row taken out.
 
     Ids and numbers become ``#`` (``max_tokens=4000``, a request id, a
-    "try again in 6ms"), so failures of one cause share a key while a
-    truncation and a rate limit of the same exception class do not.
+    "try again in 6ms"), and so does the value a validation error quotes, so
+    failures of one cause share a key while a truncation and a rate limit of
+    the same exception class do not.
     """
+    msg = _INPUT_VALUE_RE.sub("input_value=#, input_type=", msg)
     msg = _UUID_RE.sub("#", msg)
     msg = _ID_RE.sub("#", msg)
     msg = _NUMBER_RE.sub("#", msg)

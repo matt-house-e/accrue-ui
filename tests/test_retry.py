@@ -1113,6 +1113,27 @@ def test_known_deterministic_messages_are_not_retryable(msg: str, kind: str):
     )
 
 
+def test_a_validation_error_quoting_the_output_still_groups():
+    """An exhausted parse retry quotes the model's output (pydantic's
+    ``input_value=``) well inside the key cap; one cause must not split into a
+    group per distinct output."""
+    msg = (
+        "LLMStep 'classify' failed after 3 parse attempts (model=claude-haiku-4-5)"
+        ": 1 validation error for Out\nindustry\n  Input should be 'saas' or "
+        "'other' [type=literal_error, input_value={v!r}, input_type=str]"
+    )
+    keys = {
+        index_mod._normalise_message(msg.format(v=v))
+        for v in ("healthcare", "retail, wholesale", {"name": "Acme"})
+    }
+    one_key = (
+        "LLMStep 'classify' failed after # parse attempts (model=claude-haiku-#-#)"
+        ": # validation error for Out industry Input should be 'saas' or 'other' "
+        "[type=literal_error, input_value=#, input_type=str]"
+    )
+    assert keys == {one_key}
+
+
 def test_the_logs_retryable_flag_wins_over_the_message():
     verdict = index_mod._error_verdict(
         {"type": "LLMAPIError", "msg": "truncated at max_tokens", "retryable": True}

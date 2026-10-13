@@ -119,7 +119,8 @@ Full snapshot of the run, including the complete cell-state array.
       "step": "web_search",
       "type": "RateLimitError",
       "key": "Rate limit reached for gpt-#-mini on tokens per minute (TPM): Limit #, ...",
-                                     // the message with ids/numbers as "#",
+                                     // the message with ids, numbers and a
+                                     // validation error's input_value as "#",
                                      // ≤200 chars: one cause per key
       "count": 38,
       "message": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, ...",
