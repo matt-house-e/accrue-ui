@@ -18,7 +18,9 @@ To look at a run log without installing anything, use
 uvx --from accrue-ui accrue-ui .accrue/runs/2026-08-20a.jsonl
 ```
 
-Or install it alongside accrue:
+`uvx` runs in a throwaway environment that can't import your pipeline, so
+for [retries](#retrying-failed-rows), or to keep it around, install it in
+the environment your pipeline runs in:
 
 ```bash
 pip install accrue-ui
@@ -36,10 +38,6 @@ dashboard:
 ```bash
 accrue watch .accrue/runs/2026-08-20a.jsonl
 ```
-
-`uvx` runs in a throwaway environment that can't import your pipeline, so
-for [retries](#retrying-failed-rows) use `pip install accrue-ui` in the
-environment your pipeline runs in.
 
 Requires Python 3.10+ and a run log — write one with
 `pipeline.run(..., run_log=True)`.
