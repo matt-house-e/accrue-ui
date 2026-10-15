@@ -66,11 +66,12 @@ function kvRows(d) {
   }
   if (d.usage) {
     rows.push(["Tokens", `${fmtInt(d.usage.in)} in · ${fmtInt(d.usage.out)} out`]);
-    // Null on a log that predates cache-token fields; the Cost tab explains.
-    if (d.usage.cache_read != null || d.usage.cache_write != null) {
+    // Both null together on a log that predates cache-token fields (the
+    // server reads them as a pair); the Cost tab explains.
+    if (d.usage.cache_read != null) {
       rows.push([
         "Cache tokens",
-        `${fmtInt(d.usage.cache_read ?? 0)} read · ${fmtInt(d.usage.cache_write ?? 0)} write`,
+        `${fmtInt(d.usage.cache_read)} read · ${fmtInt(d.usage.cache_write)} write`,
       ]);
     }
     if (d.usage.cost != null) rows.push(["Cost", fmtMoney(d.usage.cost)]);
