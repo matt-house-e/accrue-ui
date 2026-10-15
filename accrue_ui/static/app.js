@@ -27,7 +27,9 @@ import {
   showInternalFields,
   snapshot,
   viewMode,
+  wrapCells,
 } from "./lib/store.js";
+import { ColumnPickerButton } from "./views/columns.js";
 import { Grid } from "./views/grid.js";
 import { Inspector } from "./views/inspector.js";
 import { Triage } from "./views/triage.js";
@@ -247,6 +249,15 @@ function TabRow({ snap }) {
           onInput=${(e) => (searchQuery.value = e.target.value)}
         />
       </label>
+      ${mode === "data" && html`<${ColumnPickerButton} snap=${snap} />`}
+      ${mode === "data" &&
+      html`<button
+        class=${`chip${wrapCells.value ? " active" : ""}`}
+        title="Truncate values to one line, or wrap them to three"
+        onClick=${() => (wrapCells.value = !wrapCells.value)}
+      >
+        ${wrapCells.value ? "Wrap" : "Truncate"}
+      </button>`}
       ${mode === "data" &&
       html`<button
         class=${`chip${showInternalFields.value ? " active" : ""}`}

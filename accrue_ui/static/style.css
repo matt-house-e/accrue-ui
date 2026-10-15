@@ -422,15 +422,66 @@ button:disabled { cursor: not-allowed; }
   position: sticky;
   top: 0;
   z-index: 10;
-  display: grid;
-  gap: var(--row-gap);
-  align-items: end;
   background: var(--ground);
   padding: 12px 0 8px;
   border-bottom: 1px solid var(--border-1);
   min-width: min-content;
 }
+.head-row {
+  display: grid;
+  gap: var(--row-gap);
+  align-items: end;
+}
+.head-row.fields { margin-top: 8px; }
 .col-head { min-width: 0; }
+/* The key column stays put while 49 field columns scroll under it (#37).
+   Rows and heads are given an explicit width equal to their columns, so the
+   sticky label is never confined to a row narrower than its content. */
+.grid-head.fixed, .grid-row.fixed { right: auto; }
+.col-head.pinned, .row-label.pinned {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--ground);
+}
+.col-head.pinned .field-name { color: var(--faint-2); }
+.step-band {
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--border-2);
+  overflow: hidden;
+}
+.step-band .step-name { white-space: nowrap; flex-wrap: nowrap; }
+.field-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding-right: 6px;
+}
+.field-name {
+  font: 500 11.5px/1 var(--font-mono);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.field-name.dim { color: var(--faint-2); font-weight: 400; }
+.field-head .field-chip { margin-top: 0; flex: none; }
+.col-resize {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+}
+.col-resize:hover, body.resizing .col-resize { box-shadow: inset 2px 0 0 var(--jade-9); }
+body.resizing { cursor: col-resize; user-select: none; }
+.col-spacer { min-width: 0; }
+.dcell.state-only { justify-content: center; }
 .col-head .step-name {
   font: 500 12px/1 var(--font-mono);
   color: var(--ink);
@@ -541,6 +592,17 @@ button:disabled { cursor: not-allowed; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* wrap mode: three clamped lines in a taller fixed row, so the virtualizer
+   keeps one pitch */
+.grid-wrap.wrap .dcell { align-items: flex-start; padding-top: 7px; padding-bottom: 7px; }
+.grid-wrap.wrap .dcell .val {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
 /* present-but-null, so it never reads as an empty string */
 .dcell .val.null { color: var(--faint-1); }
 /* object-valued field: the cell shows one sub-key, hover shows them all */
@@ -599,6 +661,58 @@ button:disabled { cursor: not-allowed; }
 .sse-status { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .sse-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint-1); flex: none; }
 .sse-dot.on { background: var(--jade-11); }
+
+/* ---------- popovers: header menus, column picker (#37) ---------- */
+
+.menu-anchor { display: inline-flex; min-width: 0; }
+.popover {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 95; /* above the grid heads (10); below the tooltip (100) */
+  background: var(--component);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+  font: 400 12px/1.4 var(--font-sans);
+  color: var(--muted);
+  visibility: hidden;
+}
+.popover.placed { visibility: visible; }
+.popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 8px;
+  font: 500 12px/1 var(--font-sans);
+  color: var(--ink);
+}
+.link-btn {
+  font: 400 11.5px/1 var(--font-sans);
+  color: var(--jade-11);
+}
+.link-btn:hover { text-decoration: underline; }
+.picker { max-height: 60vh; overflow: auto; }
+.picker-step { padding: 4px 0; border-top: 1px solid var(--border-1); }
+.picker-step-name {
+  font: 500 11px/1 var(--font-mono);
+  color: var(--faint-2);
+  padding: 6px 4px 4px;
+}
+.picker-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.picker-field:hover { background: var(--hover); color: var(--ink); }
+.picker-field input { accent-color: var(--jade-9); margin: 0; }
 
 /* ---------- inspector ---------- */
 

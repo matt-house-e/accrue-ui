@@ -33,11 +33,14 @@ export const activeTab = signal("grid"); // 'grid' | 'overview' | 'errors' | 'co
 export const rowFilter = signal("all"); // 'all' | 'errors' | 'retrying' | 'skipped'
 export const searchQuery = signal("");
 export const showInternalFields = signal(false);
-export const fieldChoice = signal({}); // stepName -> selected field name
-// stepName -> the sub-key its data column shows for object-valued fields.
-// Per column, not per field: one choice covers every {value, source} field
-// the field-chip cycles through (accrue-ui#36).
+// colId ("step/field") -> the sub-key that data column shows for object-valued
+// fields (accrue-ui#36). Per column: with one column per field (accrue-ui#37)
+// a per-step choice would flip the other 48 columns on one click.
 export const subKeyChoice = signal({});
+// ---- data-grid layout (accrue-ui#37) -----------------------------------
+export const hiddenCols = signal([]); // colIds the column picker hid
+export const wrapCells = signal(false); // truncate (one line) | wrap (3 lines)
+export const colWidths = signal({}); // colId -> px; memory only, not in the hash
 export const sseStatus = signal("idle"); // 'idle' | 'connected'
 export const cellDetail = signal(null); // /api/cell payload for selection
 export const cellDetailLoading = signal(false);
@@ -99,20 +102,16 @@ export function stateAt(row, stepIndex) {
   return arr[row * stepCount() + stepIndex];
 }
 
+// Column identity for the data grid: one column per (step, field); a bare
+// step name is the step's state column (docs/api-shapes.md, /api/rows).
+export function colId(stepName, field) {
+  return field == null ? stepName : `${stepName}/${field}`;
+}
+
 // Visible (non-internal unless toggled) field list for a step.
 export function stepFields(step) {
   const fields = step.fields || [];
   return showInternalFields.value ? fields : fields.filter((f) => !f.startsWith("__"));
-}
-
-// The field a step's data column is currently showing: the chip's choice,
-// but only while it is still visible. Cycling onto an internal field and
-// then hiding internal fields would otherwise leave the column rendering a
-// field the toggle says is hidden — fall back to the first visible one.
-export function selectedField(step) {
-  const fields = stepFields(step);
-  const choice = fieldChoice.value[step.name];
-  return choice && fields.includes(choice) ? choice : fields[0] || null;
 }
 
 // The sub-keys seen under a step's object-valued field, or null when no
@@ -128,14 +127,14 @@ export function subKeysFor(stepName, field) {
 export function selectedSubKey(stepName, field) {
   const seen = subKeysFor(stepName, field);
   if (!seen) return null;
-  const choice = subKeyChoice.value[stepName];
+  const choice = subKeyChoice.value[colId(stepName, field)];
   return choice && seen.keys.includes(choice) ? choice : seen.d;
 }
 
 // The sub-key one cell shows for its {o, d} entry: the column's choice when
 // this object has it — rows need not share keys — else its own default.
-export function subKeyOf(stepName, entry) {
-  const choice = subKeyChoice.value[stepName];
+export function subKeyOf(stepName, field, entry) {
+  const choice = subKeyChoice.value[colId(stepName, field)];
   return choice && choice in entry.o ? choice : entry.d;
 }
 
@@ -221,20 +220,29 @@ function forgetRun() {
   retryError.value = null;
 }
 
-const pendingWindows = new Set();
+// Rows with a request in flight, so two renders never ask twice.
+const pendingRows = new Set();
+// /api/values?rows= serves at most this many per request (docs/api-shapes.md).
+export const VALUES_PAGE_MAX = 1000;
 
-export async function loadValues(start, count) {
-  const key = `${start}:${count}`;
-  if (pendingWindows.has(key)) return;
-  pendingWindows.add(key);
+// Values for an explicit row list — the visible rows, in whatever order a
+// sort or filter put them (accrue-ui#37). A contiguous window could not
+// serve a sorted grid without paging most of the run.
+export async function loadValuesFor(rows) {
+  const want = rows.filter((r) => !pendingRows.has(r));
+  if (!want.length) return;
+  for (const r of want) pendingRows.add(r);
   try {
-    const res = await fetch(apiPath(`/api/values?start=${start}&count=${count}`));
-    if (!res.ok) return;
-    const data = await res.json();
-    for (const row of data.rows || []) {
-      valuesCache.delete(row.row); // refresh position for LRU-ish eviction
-      valuesCache.set(row.row, row);
-      noteSubKeys(row);
+    for (let i = 0; i < want.length; i += VALUES_PAGE_MAX) {
+      const page = want.slice(i, i + VALUES_PAGE_MAX);
+      const res = await fetch(apiPath(`/api/values?rows=${page.join(",")}`));
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const row of data.rows || []) {
+        valuesCache.delete(row.row); // refresh position for LRU-ish eviction
+        valuesCache.set(row.row, row);
+        noteSubKeys(row);
+      }
     }
     while (valuesCache.size > VALUES_CAP) {
       valuesCache.delete(valuesCache.keys().next().value);
@@ -243,7 +251,7 @@ export async function loadValues(start, count) {
   } catch {
     // dev stub / offline: values stay unloaded, grid shows indices only
   } finally {
-    pendingWindows.delete(key);
+    for (const r of want) pendingRows.delete(r);
   }
 }
 
@@ -352,20 +360,19 @@ export function closeInspector() {
   cellDetail.value = null;
 }
 
-export function cycleField(step) {
-  const fields = stepFields(step);
-  if (fields.length < 2) return;
-  const current = selectedField(step);
-  const next = fields[(fields.indexOf(current) + 1) % fields.length];
-  fieldChoice.value = { ...fieldChoice.value, [step.name]: next };
-}
-
 export function cycleSubKey(step, field) {
   const seen = subKeysFor(step.name, field);
   if (!seen || seen.keys.length < 2) return;
   const current = selectedSubKey(step.name, field);
   const next = seen.keys[(seen.keys.indexOf(current) + 1) % seen.keys.length];
-  subKeyChoice.value = { ...subKeyChoice.value, [step.name]: next };
+  subKeyChoice.value = { ...subKeyChoice.value, [colId(step.name, field)]: next };
+}
+
+export function toggleColumn(id) {
+  const hidden = hiddenCols.value;
+  hiddenCols.value = hidden.includes(id)
+    ? hidden.filter((h) => h !== id)
+    : [...hidden, id];
 }
 
 // Deltas carry cell states and counters — never error_groups. During a live

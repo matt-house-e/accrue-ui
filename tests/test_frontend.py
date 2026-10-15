@@ -31,7 +31,10 @@ STATIC_FILES = [
     "lib/store.js",
     "lib/sse.js",
     "lib/tooltip.js",
+    "lib/popover.js",
+    "views/columns.js",
     "views/grid.js",
+    "views/overview.js",
     "views/inspector.js",
     "views/triage.js",
     "views/cost.js",
@@ -407,8 +410,12 @@ def test_values_fetching_pages_and_cannot_feed_itself():
     memo_deps = grid.split("computeRows(arr, nsteps, filter, query)", 1)[1]
     memo_deps = memo_deps.split("]", 1)[0]
     assert "vversion" not in memo_deps
-    assert "VALUES_PAGE_MAX = 1000" in grid  # matches the server's clamp
-    assert "missingWindows" in grid
+    # Values are asked for by explicit row list — a sorted or filtered grid
+    # shows scattered rows — paged at the server's cap (accrue-ui#37).
+    store = (STATIC / "lib" / "store.js").read_text()
+    assert "VALUES_PAGE_MAX = 1000" in store  # matches the server's clamp
+    assert "/api/values?rows=" in store
+    assert "missingRows" in grid
     assert "!valuesCache.has(r)" in grid
     # The fetch effect keys off the row SET, not every cell-state bump.
     effect_deps = grid.split("}, 150);", 1)[1].split("[", 1)[1].split("]", 1)[0]
@@ -431,11 +438,12 @@ def test_nested_values_show_one_sub_key_and_hover_the_rest():
     """
     grid = (STATIC / "views" / "grid.js").read_text()
     store = (STATIC / "lib" / "store.js").read_text()
-    assert "v.o[subKeyOf(stepName, v)]" in grid
+    assert "v.o[subKeyOf(stepName, field, v)]" in grid
     assert "data-tip=${tip}" in grid  # the whole object, one sub-key per line
     assert "cycleSubKey(step, field)" in grid
     assert "choice in entry.o ? choice : entry.d" in store
-    assert "subKeyChoice.value[stepName]" in store  # keyed by column only
+    # Keyed per column — one column per field since accrue-ui#37.
+    assert "subKeyChoice.value[colId(stepName, field)]" in store
     assert "subKeysSeen.clear()" in store  # another run's keys don't linger
     assert "noteSubKeys(row)" in store  # grown on load, not scanned per render
 
