@@ -42,6 +42,14 @@ accrue watch .accrue/runs/2026-08-20a.jsonl
 Requires Python 3.10+ and a run log — write one with
 `pipeline.run(..., run_log=True)`.
 
+If you keep one run per folder, point the dashboard at the folder instead. It
+lists every run log under it, named by folder, and you switch between them
+from the run menu in the header:
+
+```bash
+accrue-ui --runs-dir out    # out/<run>/<model>/run.jsonl -> "<run>/<model>"
+```
+
 ## Retrying failed rows
 
 Point the dashboard at the pipeline that produced the run and the triage
