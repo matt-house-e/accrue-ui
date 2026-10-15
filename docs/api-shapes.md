@@ -393,8 +393,9 @@ over-wide window is a refetch loop, not a retry.
   already truncated), or `null` when there is nothing to show (pending,
   running, most skips). For error/retrying cells `v` MAY carry a short error
   preview (e.g. `"RateLimitError · 3 attempts"`). Kept for back-compat; it is
-  always `f`'s first non-internal entry when `f` is non-null.
-- `f` — field name -> rendered preview string, one entry per field the step
+  `f`'s first non-internal entry when `f` is non-null, except that an
+  object-valued field stays one JSON dump here.
+- `f` — field name -> rendered preview, one entry per field the step
   produced (same truncation rules as `v`), or `null` for cells with nothing
   to render (pending/running/error/retrying/skipped, or a step with no
   values yet). `"__"`-prefixed internal fields **are** included, matching
@@ -404,6 +405,23 @@ over-wide window is a refetch loop, not a retry.
   the data grid's field-chip actually switch the rendered value, not just
   the column label (accrue-ui#23) — a client must read the chosen field out
   of `f`, not assume `v` tracks the selection.
+
+  An entry is a string, `null` (the field's value **was** `null`: distinct
+  from `""`, and from a field absent from the map), or — for an object value
+  with 1–32 sub-keys — `{"o": {sub_key: preview}, "d": sub_key}`
+  (accrue-ui#36):
+
+  ```jsonc
+  "revenue": { "o": { "value": "$12M", "source": "https://…" }, "d": "value" }
+  ```
+
+  `o` holds every sub-key, each rendered and truncated like a field (a
+  nested object or list under it is a JSON dump; `null` stays `null`). `d`
+  is the sub-key to show when the column has no choice of its own: `value`
+  when present, else the first sub-key holding a scalar, else the first.
+  `{}`, lists, and objects with more than 32 sub-keys render as plain JSON
+  strings. A wider object is a map rather than a record, and splitting it
+  would multiply the entry's size by its width.
 - `s` — the cell-state byte, same encoding as `cells.data`.
 
 ## `GET /api/cell/{step}/{row}`

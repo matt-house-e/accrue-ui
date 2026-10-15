@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from accrue_ui.server.index import SUBKEYS_MAX
 from tests.conftest import age_file, client_for, row, write_log
 
 PENDING, RUNNING, OK, CACHED, RETRYING, ERROR, SKIPPED = range(7)
@@ -454,6 +455,76 @@ def test_values_field_map_null_for_errored_cell(feature_log: Path):
     # Errored cells have no produced fields to choose between -> f is null,
     # so the client's field-chip lookup falls back to v (grid.js DataCell).
     assert cell["f"] is None
+
+
+def test_values_field_map_splits_nested_objects_by_sub_key(tmp_path: Path):
+    """An object-valued field arrives per sub-key, not as a cut JSON dump.
+
+    A custom-schema step emits ``{value, source}`` per field (accrue-ui#36);
+    dumped and cut at 160 characters it could not be parsed, so the grid
+    showed raw JSON. Each sub-value is rendered and truncated on its own,
+    and ``d`` names the sub-key to show by default.
+    """
+    log = tmp_path / "nested.jsonl"
+    values = {
+        "revenue": {"value": "$12M", "source": "https://example.com/" + "a" * 300},
+        "no_value_key": {"meta": {"x": 1}, "label": "Acme", "n": 3},
+        "only_nested": {"meta": {"x": 1}},
+        "empty_obj": {},
+        "listed": [1, 2],
+        "nothing": None,
+        "blank": "",
+        "null_inside": {"value": None, "source": "registry"},
+        # A map wider than SUBKEYS_MAX stays one dump: split, each sub-value
+        # would cost up to 160 chars and the entry would grow with its width.
+        "wide": {f"k{i}": "x" * 300 for i in range(SUBKEYS_MAX + 1)},
+        "widest_split": {f"k{i}": i for i in range(SUBKEYS_MAX)},
+    }
+    write_log(
+        log,
+        [
+            {
+                "v": 1,
+                "t": 0.0,
+                "type": "pipeline_start",
+                "run_id": "nested",
+                "started_at": "2026-08-19T10:00:00+00:00",
+                "num_rows": 1,
+                "steps": [{"name": "extract", "level": 0, "mode": "realtime"}],
+            },
+            {"v": 1, "t": 0.5, "type": "step_start", "step": "extract", "level": 0},
+            row("extract", 0, 1.0, values=values),
+        ],
+    )
+    with client_for(log) as client:
+        body = client.get("/api/values?start=0&count=1").json()
+    cell = body["rows"][0]["cells"]["extract"]
+    f = cell["f"]
+    assert f["revenue"]["d"] == "value"
+    assert f["revenue"]["o"]["value"] == "$12M"
+    assert len(f["revenue"]["o"]["source"]) == 160  # truncated per sub-value
+    # No "value" key: the first scalar sub-key, skipping nested ones.
+    assert f["no_value_key"] == {
+        "o": {"meta": '{"x": 1}', "label": "Acme", "n": "3"},
+        "d": "label",
+    }
+    # No scalar at all: the first sub-key.
+    assert f["only_nested"]["d"] == "meta"
+    # Empty objects and lists keep the plain string rendering.
+    assert f["empty_obj"] == "{}"
+    assert f["listed"] == "[1, 2]"
+    # Width cap: one past it is a single bounded dump, at it still splits.
+    assert isinstance(f["wide"], str) and len(f["wide"]) == 160
+    assert len(f["widest_split"]["o"]) == SUBKEYS_MAX
+    # null and "" stay distinguishable, at both levels.
+    assert f["nothing"] is None
+    assert f["blank"] == ""
+    assert f["null_inside"] == {
+        "o": {"value": None, "source": "registry"},
+        "d": "value",
+    }
+    # "v" is still the back-compat string: the first field's JSON dump.
+    assert isinstance(cell["v"], str) and cell["v"].startswith('{"value": "$12M"')
 
 
 def test_cell_detail_full_values_include_internal(feature_log: Path):

@@ -158,9 +158,12 @@ function ValuesTable({ values }) {
       ${entries.map(
         ([k, v]) => html`<tr key=${k}>
           <td class="field">${k}</td>
-          <td class="value">
-            ${typeof v === "string" ? v : JSON.stringify(v, null, 2)}
-          </td>
+          ${v === null
+            ? html`<td class="value"><span class="null">null</span></td>`
+            : typeof v === "string"
+              ? html`<td class="value">${v}</td>`
+              : // pre-wrap, so a nested object keeps its indentation
+                html`<td class="value json">${JSON.stringify(v, null, 2)}</td>`}
         </tr>`
       )}
     </tbody>

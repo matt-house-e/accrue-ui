@@ -47,6 +47,13 @@ STATE_NAMES = ("pending", "running", "ok", "cached", "retrying", "error", "skipp
 TERMINAL = frozenset({OK, CACHED, ERROR, SKIPPED})
 
 PREVIEW_MAX_CHARS = 160
+#: Widest object split per sub-key in the ``/api/values`` field map. Each
+#: sub-value costs up to PREVIEW_MAX_CHARS, so splitting a 200-key ``json``
+#: field would turn one 160-char preview into ~36KB per cell, both in this
+#: index and on every values page. A record like ``{value, source}`` is
+#: narrow; anything wider than this is a map and keeps the one-dump preview.
+#: Matches the grid's SUBKEYS_CAP (static/lib/store.js).
+SUBKEYS_MAX = 32
 HISTOGRAM_BUCKETS = 22
 BURST_MIN_COUNT = 10
 BURST_MAX_SPAN_S = 240.0
@@ -114,11 +121,12 @@ class Cell:
     t: float | None = None  # log-time of the terminal record
     values: dict[str, Any] | None = None
     preview: str | None = None
-    #: field name -> rendered preview string, one entry per field this cell's
-    #: step produced — ``__``-internal fields included, because the data grid
-    #: can be asked to show them (same truncation as ``preview``, which is
-    #: this map's first non-internal entry). Populated for OK/CACHED cells only.
-    preview_fields: dict[str, str | None] | None = None
+    #: field name -> rendered preview, one entry per field this cell's step
+    #: produced — ``__``-internal fields included, because the data grid can
+    #: be asked to show them. A preview string (same truncation as
+    #: ``preview``), or for an object-valued field its per-sub-key previews
+    #: (see ``_render_field``). Populated for OK/CACHED cells only.
+    preview_fields: dict[str, Any] | None = None
     #: One entry per row_complete seen for this cell: (offset, length,
     #: from_a_retry_segment). The bytes are re-read on demand; the flag is
     #: what makes the inspector's attempt list say "retry".
@@ -834,6 +842,34 @@ class RunIndex:
         return _truncate(_one_line(json.dumps(value, ensure_ascii=False, default=str)))
 
     @staticmethod
+    def _render_field(value: Any) -> Any:
+        """A field's entry in the ``/api/values`` field map.
+
+        Scalars, lists, ``{}`` and objects wider than ``SUBKEYS_MAX`` render
+        as ``_render_value`` does. Any other object becomes
+        ``{"o": {sub_key: preview}, "d": default}`` instead of one truncated
+        JSON dump: a dump cut at 160 characters can't be parsed, so the grid
+        could never pick a sub-key out of it (accrue-ui#36). Each sub-value is
+        truncated on its own and the width is capped, which keeps the wire
+        bound. ``d`` is the sub-key the grid shows when the column
+        has no choice of its own: ``value`` when present, else the first
+        sub-key holding a scalar, else the first. It is picked here because
+        only the server still knows the raw types — once rendered, a nested
+        object and a string starting with ``{`` look the same.
+        """
+        if not isinstance(value, dict) or not value or len(value) > SUBKEYS_MAX:
+            return RunIndex._render_value(value)
+        subs = {str(k): RunIndex._render_value(v) for k, v in value.items()}
+        if "value" in value:
+            default = "value"
+        else:
+            default = next(
+                (str(k) for k, v in value.items() if not isinstance(v, (dict, list))),
+                next(iter(subs)),
+            )
+        return {"o": subs, "d": default}
+
+    @staticmethod
     def _render_preview(
         state: int,
         values: dict[str, Any] | None,
@@ -859,14 +895,13 @@ class RunIndex:
     @staticmethod
     def _render_field_map(
         state: int, values: dict[str, Any] | None
-    ) -> dict[str, str | None] | None:
+    ) -> dict[str, Any] | None:
         """Per-field rendered previews for an OK/CACHED cell.
 
-        One entry per field the step produced (same truncation rules as
-        ``_render_preview``), so the data grid can show whichever field the
-        column's field-chip currently selects. ``None`` for cells with
-        nothing to render (error/retrying/pending/skipped, or no values at
-        all).
+        One entry per field the step produced (``_render_field``), so the
+        data grid can show whichever field the column's field-chip currently
+        selects. ``None`` for cells with nothing to render
+        (error/retrying/pending/skipped, or no values at all).
 
         ``__``-internal fields are **included**, unlike ``preview``: the
         snapshot's ``steps[].fields`` already names them, and the UI's "show
@@ -877,7 +912,7 @@ class RunIndex:
         """
         if state not in (OK, CACHED) or not values:
             return None
-        return {key: RunIndex._render_value(value) for key, value in values.items()}
+        return {key: RunIndex._render_field(value) for key, value in values.items()}
 
     # -------------------------------------------------------------- snapshot
 
@@ -1402,7 +1437,9 @@ class RunIndex:
                     # the column label (accrue-ui#23), and what the "show
                     # internal fields" toggle needs to render at all
                     # (accrue-ui#25). "v" above is kept for back-compat; it
-                    # is this map's first non-internal entry.
+                    # is this map's first non-internal entry, except that an
+                    # object-valued field stays a JSON dump in "v" and is
+                    # split per sub-key in "f" (accrue-ui#36).
                     "f": cell.preview_fields if cell else None,
                     "s": self._cells[base + j],
                 }

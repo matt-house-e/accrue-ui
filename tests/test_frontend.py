@@ -422,6 +422,37 @@ def test_grid_clamps_the_first_visible_row():
     assert "Math.max(0, rows.length - 1)" in grid
 
 
+def test_nested_values_show_one_sub_key_and_hover_the_rest():
+    """A {value, source} field shows one sub-key, the object on hover (#36).
+
+    The server sends object-valued fields as {o, d}; the grid shows the
+    column's sub-key choice (falling back to the object's own default), and
+    the choice is per column so it survives the field-chip cycling.
+    """
+    grid = (STATIC / "views" / "grid.js").read_text()
+    store = (STATIC / "lib" / "store.js").read_text()
+    assert "v.o[subKeyOf(stepName, v)]" in grid
+    assert "data-tip=${tip}" in grid  # the whole object, one sub-key per line
+    assert "cycleSubKey(step, field)" in grid
+    assert "choice in entry.o ? choice : entry.d" in store
+    assert "subKeyChoice.value[stepName]" in store  # keyed by column only
+    assert "subKeysSeen.clear()" in store  # another run's keys don't linger
+    assert "noteSubKeys(row)" in store  # grown on load, not scanned per render
+
+
+def test_null_renders_distinct_from_an_empty_string():
+    """null is a faint "null"; "" and an absent field stay blank (#36)."""
+    grid = (STATIC / "views" / "grid.js").read_text()
+    css = (STATIC / "style.css").read_text()
+    inspector = (STATIC / "views" / "inspector.js").read_text()
+    assert "v === null && !!(cell && cell.f && field in cell.f)" in grid
+    assert '<span class="val null">null</span>' in grid
+    assert ".dcell .val.null { color: var(--faint-1); }" in css
+    assert '<span class="null">null</span>' in inspector
+    # The inspector's pretty-printed objects keep their indentation.
+    assert ".values-table td.value.json { white-space: pre-wrap; }" in css
+
+
 def test_search_placeholder_admits_the_cache_limit():
     assert 'placeholder="Search loaded keys…"' in (STATIC / "app.js").read_text()
 

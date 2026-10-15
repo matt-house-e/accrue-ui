@@ -8,15 +8,19 @@ import {
   cellsVersion,
   cellStates,
   cycleField,
+  cycleSubKey,
   errorGroupFor,
   loadValues,
   rowFilter,
   searchQuery,
   select,
   selectedField,
+  selectedSubKey,
   selection,
   snapshot,
   sseStatus,
+  subKeyOf,
+  subKeysFor,
   valuesCache,
   valuesVersion,
   viewMode,
@@ -93,6 +97,7 @@ function missingWindows(rows, first, last) {
 
 function ColumnHead({ step, stepIndex, mode }) {
   const field = selectedField(step);
+  const subKeys = mode === "data" && field ? subKeysFor(step.name, field) : null;
   return html`<div class="col-head" key=${step.name}>
     <div class="step-name">
       ${step.name}
@@ -109,6 +114,14 @@ function ColumnHead({ step, stepIndex, mode }) {
     >
       ${field}
     </button>`}
+    ${subKeys &&
+    html`<button
+      class="field-chip subkey-chip"
+      title="Cycle sub-key shown"
+      onClick=${() => cycleSubKey(step, field)}
+    >
+      .${selectedSubKey(step.name, field)}
+    </button>`}
   </div>`;
 }
 
@@ -124,6 +137,21 @@ function StatusCell({ stepName, stepIndex, row, state }) {
   </button>`;
 }
 
+// Hover text for an object-valued field: every sub-key, one per line.
+function subKeysTip(entry) {
+  return Object.entries(entry.o)
+    .map(([k, v]) => `${k}: ${v === null ? "null" : v}`)
+    .join("\n");
+}
+
+// A completed cell's value: a field present but null renders as a faint
+// "null", so it never looks like an empty string (accrue-ui#36).
+function Val({ v, isNull }) {
+  return isNull
+    ? html`<span class="val null">null</span>`
+    : html`<span class="val">${v || ""}</span>`;
+}
+
 function DataCell({ step, stepName, row, state, vrow }) {
   const sel = selection.value;
   const isSel = sel && sel.step === stepName && sel.row === row;
@@ -135,7 +163,16 @@ function DataCell({ step, stepName, row, state, vrow }) {
   // non-internal entry) is the fallback for cells with no field map
   // (error/retrying/etc).
   const field = selectedField(step);
-  const v = cell && cell.f ? cell.f[field] : cell ? cell.v : null;
+  let v = cell && cell.f ? cell.f[field] : cell ? cell.v : null;
+  // An object-valued field arrives as {o, d} (docs/api-shapes.md): show the
+  // column's sub-key, the whole object on hover.
+  let tip = null;
+  if (v && typeof v === "object") {
+    tip = subKeysTip(v);
+    v = v.o[subKeyOf(stepName, v)];
+  }
+  // null only when the field is there and null — an absent field stays blank.
+  const isNull = v === null && !!(cell && cell.f && field in cell.f);
   let body;
   if (state === 5) {
     const group = errorGroupFor(stepName, row);
@@ -148,12 +185,13 @@ function DataCell({ step, stepName, row, state, vrow }) {
     body = html`<${IconDot} size=${12} />`;
   } else if (state === 3) {
     body = html`<span class="prefix"><${IconBolt} size=${11} /></span>
-      <span class="val">${v || ""}</span>`;
+      <${Val} v=${v} isNull=${isNull} />`;
   } else {
-    body = html`<span class="val">${v || ""}</span>`;
+    body = html`<${Val} v=${v} isNull=${isNull} />`;
   }
   return html`<button
-    class=${`cell dcell s${state}${isSel ? " sel" : ""}`}
+    class=${`cell dcell s${state}${isSel ? " sel" : ""}${tip ? " has-tip" : ""}`}
+    data-tip=${tip}
     onClick=${() => select(stepName, row)}
   >
     ${body}
