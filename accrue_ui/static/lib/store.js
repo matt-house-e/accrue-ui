@@ -213,7 +213,10 @@ export async function loadRun() {
   const cells = data.cells;
   const prev = snapshot.value;
   batch(() => {
-    if (prev && prev.run.id !== data.run.id) forgetRun();
+    // Another log (accrue-ui#38) can hold a run with the same id, so the
+    // id alone does not say the rows on screen are still this run's.
+    const otherLog = prev && prev.log?.path !== data.log?.path;
+    if (prev && (prev.run.id !== data.run.id || otherLog)) forgetRun();
     snapshot.value = data;
     cellStates.value = decodeCells(cells);
     cellsVersion.value++;
@@ -221,9 +224,15 @@ export async function loadRun() {
   });
 }
 
+// Bumped by forgetRun(): a response to a request made before it describes
+// the run that was forgotten, and must not land in the caches again.
+let runEpoch = 0;
+
 // Drop everything that belonged to the run on screen: another run (picked,
 // or a new latest one) is replacing it, and its rows share indices with it.
 function forgetRun() {
+  runEpoch++;
+  rowsSeq++;
   valuesCache.clear();
   subKeysSeen.clear();
   valuesVersion.value++;
@@ -248,12 +257,14 @@ export async function loadValuesFor(rows) {
   const want = rows.filter((r) => !pendingRows.has(r));
   if (!want.length) return;
   for (const r of want) pendingRows.add(r);
+  const epoch = runEpoch;
   try {
     for (let i = 0; i < want.length; i += VALUES_PAGE_MAX) {
       const page = want.slice(i, i + VALUES_PAGE_MAX);
       const res = await fetch(apiPath(`/api/values?rows=${page.join(",")}`));
       if (!res.ok) continue;
       const data = await res.json();
+      if (epoch !== runEpoch) return;
       for (const row of data.rows || []) {
         valuesCache.delete(row.row); // refresh position for LRU-ish eviction
         valuesCache.set(row.row, row);
@@ -274,11 +285,13 @@ export async function loadValuesFor(rows) {
 export async function loadCell(stepName, row) {
   cellDetailLoading.value = true;
   cellDetail.value = null;
+  const epoch = runEpoch;
   try {
     const res = await fetch(
       apiPath(`/api/cell/${encodeURIComponent(stepName)}/${row}`)
     );
-    cellDetail.value = res.ok ? await res.json() : null;
+    const detail = res.ok ? await res.json() : null;
+    if (epoch === runEpoch) cellDetail.value = detail;
   } catch {
     cellDetail.value = null;
   } finally {
@@ -294,6 +307,28 @@ export async function loadRuns() {
     return data.runs || [];
   } catch {
     return [];
+  }
+}
+
+// Serve another log from /api/runs (accrue-ui#38). The server swaps the log
+// for every tab; the caller reloads. Resolves to null, or why it failed.
+export async function selectLog(path) {
+  try {
+    const res = await fetch("/api/runs/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (res.ok) return null;
+    let message = `switch failed (${res.status})`;
+    try {
+      message = (await res.json()).detail || message;
+    } catch {
+      // non-JSON error body: keep the status-code message
+    }
+    return message;
+  } catch (e) {
+    return String(e);
   }
 }
 
@@ -414,22 +449,37 @@ export function refreshErrorGroups() {
 
 // Merge one SSE delta (see docs/api-shapes.md, GET /api/events).
 let gapRefetching = false;
+let refetchAgain = false; // a reset arrived while a refetch was in flight
+
+// Refetch the snapshot, once at a time. A reset that lands mid-refetch is
+// not dropped: that refetch may have been answered before the change the
+// reset announces (a log switch in another tab), so one more follows it.
+function refetchRun() {
+  if (gapRefetching) {
+    refetchAgain = true;
+    return;
+  }
+  gapRefetching = true;
+  loadRun()
+    .catch(() => {})
+    .finally(() => {
+      gapRefetching = false;
+      if (refetchAgain) {
+        refetchAgain = false;
+        refetchRun();
+      }
+    });
+}
 
 export function applyDelta(delta) {
-  // A reset delta means the server rebuilt its index (truncate-and-regrow):
+  // A reset delta means the server rebuilt its index (truncate-and-regrow,
+  // or POST /api/runs/select switched the log):
   // cells that existed only in the old file are in-grid, so gap detection
   // cannot catch them — the whole snapshot is stale. Refetch it wholesale
   // and ignore the rest of this payload; the fresh snapshot is authoritative
   // and later deltas continue from live state (idempotent).
   if (delta.reset) {
-    if (!gapRefetching) {
-      gapRefetching = true;
-      loadRun()
-        .catch(() => {})
-        .finally(() => {
-          gapRefetching = false;
-        });
-    }
+    refetchRun();
     return;
   }
   let gap = false;
@@ -493,12 +543,7 @@ export function applyDelta(delta) {
     // The delta references cells outside our known grid: the snapshot is
     // stale (connect race, or the log was rebuilt) — refetch it. Deltas are
     // idempotent state, so re-applying after the refetch is safe.
-    gapRefetching = true;
-    loadRun()
-      .catch(() => {})
-      .finally(() => {
-        gapRefetching = false;
-      });
+    refetchRun();
   }
 }
 

@@ -59,7 +59,7 @@ export function Popover({ anchor, onClose, width = 260, children }) {
 }
 
 // A button that owns one popover: `render(close)` builds its body.
-export function MenuButton({ class: cls = "", title, label, active = false, render }) {
+export function MenuButton({ class: cls = "", title, label, active = false, width, render }) {
   const [open, setOpen] = useState(false);
   const btn = useRef(null);
   const close = () => setOpen(false);
@@ -77,6 +77,6 @@ export function MenuButton({ class: cls = "", title, label, active = false, rend
     >
       ${label}
     </button>
-    ${open && html`<${Popover} anchor=${btn.current} onClose=${close}>${render(close)}<//>`}
+    ${open && html`<${Popover} anchor=${btn.current} onClose=${close} width=${width}>${render(close)}<//>`}
   </span>`;
 }

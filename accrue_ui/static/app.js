@@ -12,6 +12,7 @@ import {
   unpricedTip,
 } from "./lib/fmt.js";
 import { connect, disconnect } from "./lib/sse.js";
+import { MenuButton } from "./lib/popover.js";
 import { initTooltips } from "./lib/tooltip.js";
 import {
   activeTab,
@@ -22,6 +23,7 @@ import {
   loadRuns,
   readHash,
   rowFilter,
+  selectLog,
   selectedRun,
   selection,
   showInternalFields,
@@ -59,26 +61,46 @@ function runLabel(run) {
   return run.name && run.name !== run.id ? `${run.name} / ${run.id}` : run.id;
 }
 
-function RunChip({ run }) {
-  const [open, setOpen] = useState(false);
-  const [runs, setRuns] = useState([]);
-  const toggle = async () => {
-    if (!open) setRuns(await loadRuns());
-    setOpen(!open);
+// The run logs /api/runs lists — the served log's siblings, or every log
+// under --runs-dir (accrue-ui#38). Picking one asks the server to serve it.
+function RunMenu({ close }) {
+  const [runs, setRuns] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    loadRuns().then(setRuns);
+  }, []);
+  const pick = async (r) => {
+    if (r.served) return close();
+    const failed = await switchLog(r);
+    if (failed) setError(failed);
+    else close();
   };
-  return html`<button class="run-chip" onClick=${toggle}>
-    ${runLabel(run)}
-    <${IconChevronDown} />
-    ${open &&
-    html`<div class="run-menu">
-      ${runs.map(
-        (r) => html`<span class="run-menu-item" key=${r.id}>
-          ${runLabel(r)}
-          ${r.live && html`<span class="live-dot"></span>`}
-        </span>`
-      )}
-    </div>`}
-  </button>`;
+  if (runs == null) return html`<div class="run-menu-note">Loading runs…</div>`;
+  return html`<div class="run-menu">
+    ${runs.map(
+      (r) => html`<button
+        class=${`run-menu-item${r.served ? " current" : ""}`}
+        key=${r.path}
+        title=${r.path}
+        aria-current=${r.served ? "true" : undefined}
+        onClick=${() => pick(r)}
+      >
+        <span class="run-menu-name">${runLabel(r)}</span>
+        ${r.live && html`<span class="live-dot"></span>`}
+      </button>`
+    )}
+    ${error && html`<div class="run-menu-note error">${error}</div>`}
+  </div>`;
+}
+
+function RunChip({ run }) {
+  return html`<${MenuButton}
+    class="run-chip"
+    title="Switch run log"
+    width=${400}
+    label=${html`${runLabel(run)} <${IconChevronDown} />`}
+    render=${(close) => html`<${RunMenu} close=${close} />`}
+  />`;
 }
 
 // Trigger the report download. Same-origin GET, so the HttpOnly launch-token
@@ -114,6 +136,23 @@ function TopBar({ snap }) {
     </span>`}
     <span class="elapsed">${fmtDuration(elapsedS.value)}</span>
   </header>`;
+}
+
+// Serve another log (accrue-ui#38): a run pinned in the old log means
+// nothing in the new one, so follow its latest. The stream is closed across
+// the swap and reopened after, like switchRun(). Resolves to null, or why
+// the server refused.
+async function switchLog(entry) {
+  disconnect();
+  try {
+    const failed = await selectLog(entry.path);
+    if (failed) return failed;
+    selectedRun.value = null;
+    await loadRun();
+    return null;
+  } finally {
+    connect();
+  }
 }
 
 // Pin the picked run — or follow the latest again — and reload: every fetch
