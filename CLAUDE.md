@@ -35,7 +35,14 @@ Backend lives in `accrue_ui/server/`:
 - **`routes.py`** —
   - `GET /api/run` — snapshot, including the full cell-state array
   - `GET /api/cell/{step}/{row}` — one cell's detail (prompt, response, error, cost)
-  - `GET /api/values?start=A&count=N` — windowed row values
+  - `GET /api/values?start=A&count=N` — windowed row values; `?rows=1,5,9`
+    for the scattered rows a sorted or filtered grid shows (both capped at
+    1000)
+  - `GET /api/rows?q=&scope=&filter=<json>&sort=col:dir&facet=col` — row
+    indices matching a server-side search, filter and sort over the raw
+    cell values, plus total/matched counts (logic in `query.py`). Value
+    filters see settled cells only; a column the run never produced is
+    missing everywhere, never a 400; the scan runs in a worker thread
   - `GET /api/events` — SSE stream of coalesced deltas, ≤10Hz
   - `POST /api/retry` — retry failed rows: `{rows}`, `{group}` or `{all}`
     (requires `--pipeline`; 409 otherwise, while one is already running, and
@@ -61,6 +68,11 @@ Backend lives in `accrue_ui/server/`:
   `RunLog` keeps one `RunIndex` per `run_id` and routes `retry_start` by its
   `run_id`. Routes take `?run=<id>` and default to the latest. Never fold two
   runs into one index.
+- **`query.py`** — `/api/rows`: parses `filter`/`sort`/`scope` into a
+  `QuerySpec`, walks the grid once over references captured at the start
+  (`_resize` swaps the state array rather than mutating it, so a captured
+  array always matches its captured column count), and caches results per
+  index `revision`. Object-valued fields filter and sort on one sub-key.
 - **`events.py`** — SSE delta fan-out. Drop-and-coalesce: each client holds
   one mergeable pending payload (state, not a journal), flushed ≤10Hz.
 - **`retry.py`** — retry orchestration: imports `--pipeline`/`--data` once at

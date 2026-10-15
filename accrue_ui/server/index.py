@@ -31,7 +31,7 @@ import json
 import os
 import re
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -325,7 +325,14 @@ class RunIndex:
         # --- SSE delta tracking (drained by the coalescer, see drain_delta) --
         self._dirty_cells: dict[tuple[int, int], int] = {}  # (row, step) -> state
         self._dirty_steps: set[str] = set()
+        self._dirty_fields: set[str] = set()  # steps whose field list grew
         self._sent_stats: dict[str, Any] = {}  # stats as of the last drain
+        # --- queries (/api/rows, see query.py) -----------------------------
+        #: Bumped on every applied record. A query result is cached against
+        #: it, so an identical query is free while nothing changed and never
+        #: stale once something did.
+        self.revision = 0
+        self.query_cache: OrderedDict = OrderedDict()
 
     # ------------------------------------------------------------------ dims
 
@@ -336,6 +343,16 @@ class RunIndex:
     @property
     def steps(self) -> list[StepState]:
         return self._steps
+
+    @property
+    def states(self) -> bytearray:
+        """The row-major cell-state bytes, read-only by convention.
+
+        ``_resize`` swaps in a new array rather than growing this one, so a
+        reference taken together with ``len(steps)`` stays self-consistent
+        while a scan off the event loop walks it (query.py).
+        """
+        return self._cells
 
     def _resize(self, nrows: int, nsteps: int) -> None:
         old = self._cells
@@ -407,6 +424,7 @@ class RunIndex:
     # ----------------------------------------------------------------- apply
 
     def apply(self, record: TailRecord) -> None:
+        self.revision += 1
         data = record.data
         t = data.get("t")
         if isinstance(t, (int, float)):
@@ -678,6 +696,9 @@ class RunIndex:
             for key in values:
                 if key not in step.fields:
                     step.fields.append(key)
+                    # The data grid lays out one column per field: tell live
+                    # clients about a new one without a snapshot refetch.
+                    self._dirty_fields.add(name)
             if self.display_key and self.display_key in values:
                 key_val = values[self.display_key]
                 if key_val is not None:
@@ -860,14 +881,7 @@ class RunIndex:
         if not isinstance(value, dict) or not value or len(value) > SUBKEYS_MAX:
             return RunIndex._render_value(value)
         subs = {str(k): RunIndex._render_value(v) for k, v in value.items()}
-        if "value" in value:
-            default = "value"
-        else:
-            default = next(
-                (str(k) for k, v in value.items() if not isinstance(v, (dict, list))),
-                next(iter(subs)),
-            )
-        return {"o": subs, "d": default}
+        return {"o": subs, "d": default_sub_key(value)}
 
     @staticmethod
     def _render_preview(
@@ -1249,7 +1263,14 @@ class RunIndex:
             [row, step_i, state] for (row, step_i), state in self._dirty_cells.items()
         ]
         steps = [
-            {"name": s.name, "done": s.done, "errors": s.errors}
+            {
+                "name": s.name,
+                "done": s.done,
+                "errors": s.errors,
+                # Only when the list grew (additive, docs/api-shapes.md): the
+                # data grid adds the column, no snapshot refetch needed.
+                **({"fields": list(s.fields)} if s.name in self._dirty_fields else {}),
+            }
             for s in self._steps
             if s.name in self._dirty_steps
         ]
@@ -1270,6 +1291,7 @@ class RunIndex:
             return None
         self._dirty_cells.clear()
         self._dirty_steps.clear()
+        self._dirty_fields.clear()
         self._sent_stats = stats
         return {
             "t": round(self._elapsed_s(), 3),
@@ -1420,31 +1442,45 @@ class RunIndex:
         return self._row_keys.get(row, f"row {row}")
 
     def values_window(self, start: int, count: int) -> dict[str, Any]:
-        nsteps = len(self._steps)
         start = max(0, min(start, self._nrows))
         end = max(start, min(start + max(0, count), self._nrows))
-        rows = []
-        for r in range(start, end):
-            base = r * nsteps
-            cells: dict[str, Any] = {}
-            for j, s in enumerate(self._steps):
-                cell = s.cells.get(r)
-                cells[s.name] = {
-                    "v": cell.preview if cell else None,
-                    # Field -> rendered value, every field the step produced,
-                    # internal ones included — what lets the data grid's
-                    # field-chip cycle the actually-rendered value, not just
-                    # the column label (accrue-ui#23), and what the "show
-                    # internal fields" toggle needs to render at all
-                    # (accrue-ui#25). "v" above is kept for back-compat; it
-                    # is this map's first non-internal entry, except that an
-                    # object-valued field stays a JSON dump in "v" and is
-                    # split per sub-key in "f" (accrue-ui#36).
-                    "f": cell.preview_fields if cell else None,
-                    "s": self._cells[base + j],
-                }
-            rows.append({"row": r, "key": self.row_key(r), "cells": cells})
-        return {"start": start, "rows": rows}
+        return {
+            "start": start,
+            "rows": [self._row_values(r) for r in range(start, end)],
+        }
+
+    def values_for(self, rows: list[int]) -> dict[str, Any]:
+        """Values for an explicit row list (``/api/values?rows=``), in the
+        order asked. Indices outside the grid are dropped, not grown into.
+        A sorted or filtered grid shows scattered rows, which a contiguous
+        window cannot serve without paging most of the run (accrue-ui#37).
+        """
+        wanted = [r for r in rows if 0 <= r < self._nrows]
+        return {
+            "start": wanted[0] if wanted else 0,
+            "rows": [self._row_values(r) for r in wanted],
+        }
+
+    def _row_values(self, r: int) -> dict[str, Any]:
+        nsteps = len(self._steps)
+        base = r * nsteps
+        cells: dict[str, Any] = {}
+        for j, s in enumerate(self._steps):
+            cell = s.cells.get(r)
+            cells[s.name] = {
+                "v": cell.preview if cell else None,
+                # Field -> rendered value, every field the step produced,
+                # internal ones included — what lets the data grid show the
+                # actually-rendered value of each field column, not just a
+                # label (accrue-ui#23), and what the "show internal fields"
+                # toggle needs to render at all (accrue-ui#25). "v" above is
+                # kept for back-compat; it is this map's first non-internal
+                # entry, except that an object-valued field stays a JSON dump
+                # in "v" and is split per sub-key in "f" (accrue-ui#36).
+                "f": cell.preview_fields if cell else None,
+                "s": self._cells[base + j],
+            }
+        return {"row": r, "key": self.row_key(r), "cells": cells}
 
     # ------------------------------------------------------------------ cell
 
@@ -1790,6 +1826,19 @@ class RunLog:
 
 
 # ------------------------------------------------------------------- helpers
+
+
+def default_sub_key(value: dict[str, Any]) -> str:
+    """The sub-key an object-valued field shows (and filters/sorts on) when
+    the column has no choice of its own: ``value`` when present, else the
+    first sub-key holding a scalar, else the first. Picked server-side
+    because only the server still knows the raw types (accrue-ui#36)."""
+    if "value" in value:
+        return "value"
+    return next(
+        (str(k) for k, v in value.items() if not isinstance(v, (dict, list))),
+        str(next(iter(value))),
+    )
 
 
 def _error_type(error: dict[str, Any] | None) -> str:

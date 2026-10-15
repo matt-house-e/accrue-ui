@@ -25,8 +25,12 @@ def merge_deltas(base: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Coalesce two delta payloads into one; neither input is mutated."""
     cells = {(r, s): state for r, s, state in base["cells"]}
     cells.update({(r, s): state for r, s, state in new["cells"]})
+    # By key, not by entry: a step's optional `fields` list rides the delta
+    # that saw it grow, and must survive a later counters-only delta merging
+    # over it.
     steps = {s["name"]: s for s in base["steps"]}
-    steps.update({s["name"]: s for s in new["steps"]})
+    for s in new["steps"]:
+        steps[s["name"]] = {**steps.get(s["name"], {}), **s}
     merged = {
         "t": new["t"],
         "cells": [[r, s, state] for (r, s), state in cells.items()],

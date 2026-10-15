@@ -21,11 +21,12 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .events import DeltaBroadcaster
 from .index import RunIndex, RunLog, scan_runs
+from .query import QueryError, parse_query, select_rows
 from .report import render_report, report_filename
 from .retry import ALREADY_RUNNING, RetryController
 
@@ -52,10 +53,63 @@ async def get_run(request: Request, run: str | None = None) -> dict:
 
 @router.get("/values")
 async def get_values(
-    request: Request, start: int = 0, count: int = 50, run: str | None = None
+    request: Request,
+    start: int = 0,
+    count: int = 50,
+    rows: str | None = None,
+    run: str | None = None,
 ) -> dict:
-    """Windowed row values for the data render mode; clamped to log bounds."""
-    return _index(request, run).values_window(start, min(count, VALUES_MAX_COUNT))
+    """Row values for the data render mode: a contiguous window
+    (``start``/``count``) or an explicit row list (``rows=1,5,9`` — what a
+    sorted or filtered grid shows). Both are capped at VALUES_MAX_COUNT
+    rows; indices outside the log are dropped.
+    """
+    index = _index(request, run)
+    if rows is not None:
+        try:
+            wanted = [int(r) for r in rows.split(",") if r.strip()]
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail='"rows" must be comma-separated integers'
+            ) from None
+        return index.values_for(wanted[:VALUES_MAX_COUNT])
+    return index.values_window(start, min(count, VALUES_MAX_COUNT))
+
+
+@router.get("/rows")
+async def get_rows(
+    request: Request,
+    q: str = "",
+    scope: str | None = None,
+    filter_: str | None = Query(None, alias="filter"),
+    sort: str | None = None,
+    sort_sub: str | None = None,
+    facet: str | None = None,
+    only: str | None = None,
+    run: str | None = None,
+) -> dict:
+    """Row indices matching a search, filter and sort over cell values.
+
+    Pure read over the in-memory index (shape and semantics:
+    docs/api-shapes.md, ``GET /api/rows``; logic: ``query.py``). The scan
+    runs in a worker thread so a wide run — or a slow regex — never stalls
+    the tail, the SSE flush or a retry on the event loop. A malformed query
+    is a 400; a column the run never produced is simply missing everywhere.
+    """
+    index = _index(request, run)
+    try:
+        spec = parse_query(
+            q=q,
+            scope=scope,
+            filter=filter_,
+            sort=sort,
+            sort_sub=sort_sub,
+            facet=facet,
+            only=only,
+        )
+    except QueryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return await asyncio.to_thread(select_rows, index, spec)
 
 
 @router.get("/cell/{step}/{row}")
