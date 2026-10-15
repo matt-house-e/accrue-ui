@@ -456,3 +456,90 @@ def test_overview_system_prompt_carried_per_step(retries_log: Path):
     assert "structured data enrichment engine" in classify["system_prompt"]
     assert classify["system_prompt"] != assess["system_prompt"]  # per-step
     assert "B2B account analyst" in assess["system_prompt"]
+
+
+# --- #40: every batch id, and a type the values do not match ----------------
+
+
+def _one_step_log(
+    tmp_path: Path,
+    rows: list[dict],
+    step_ends: list[dict],
+    *,
+    mode: str = "batch",
+    fields: list[dict] | None = None,
+) -> Path:
+    """A one-step ("enrich") manifest run with the given rows and step_ends."""
+    records = [
+        {
+            "v": 1,
+            "t": 0.0,
+            "type": "pipeline_start",
+            "run_id": "one-step",
+            "started_at": "2026-10-15T10:00:00Z",
+            "num_rows": 3,
+            "steps": [{"name": "enrich", "level": 0, "mode": mode, "model": "m"}],
+            "manifest": {
+                "accrue_version": "1.5.0",
+                "config": {"batch": mode == "batch", "capture": "metadata"},
+                "steps": [
+                    {
+                        "name": "enrich",
+                        "type": "LLMStep",
+                        "model": {"id": "m", "provider": "p"},
+                        "produces": [f["name"] for f in fields or []],
+                        "depends_on": [],
+                        "condition": None,
+                    }
+                ],
+                "fields": fields or [],
+            },
+            "plan": None,
+        },
+        *rows,
+        *(
+            {"v": 1, "t": 5.0, "type": "step_end", "step": "enrich", **end}
+            for end in step_ends
+        ),
+    ]
+    log = tmp_path / "one_step.jsonl"
+    write_log(log, records)
+    age_file(log)
+    return log
+
+
+def _outcome(log: Path) -> dict:
+    with client_for(log) as client:
+        return client.get("/api/run").json()["overview"]["steps"][0]["outcome"]
+
+
+def test_overview_split_batch_shows_every_batch_id(tmp_path: Path):
+    """A batch split by count or bytes (accrue#169) lists every id, in order;
+    batch_id is only the first of them."""
+    end = {"batch_id": "msgbatch_a", "batch_ids": ["msgbatch_a", "msgbatch_b"]}
+    log = _one_step_log(tmp_path, [], [end])
+    assert _outcome(log)["batch_ids"] == ["msgbatch_a", "msgbatch_b"]
+
+
+def test_overview_batch_id_fallback_for_older_logs(tmp_path: Path):
+    """A log written before accrue#169 has no batch_ids: fall back to batch_id."""
+    log = _one_step_log(tmp_path, [], [{"batch_id": "msgbatch_a"}])
+    assert _outcome(log)["batch_ids"] == ["msgbatch_a"]
+
+
+def test_overview_realtime_step_has_no_batch_ids(tmp_path: Path):
+    log = _one_step_log(
+        tmp_path, [], [{"batch_id": None, "batch_ids": []}], mode="realtime"
+    )
+    assert _outcome(log)["batch_ids"] == []
+
+
+def test_overview_retry_segment_batch_ids_accumulate(tmp_path: Path):
+    """A retry segment submits its own batch and emits its own step_end: both
+    batches belong to the step, and a repeated id is listed once."""
+    ends = [
+        {"batch_id": "msgbatch_a", "batch_ids": ["msgbatch_a", "msgbatch_b"]},
+        {"batch_id": "msgbatch_c", "batch_ids": ["msgbatch_c", "msgbatch_a"]},
+    ]
+    log = _one_step_log(tmp_path, [], ends)
+    assert _outcome(log)["batch_ids"] == ["msgbatch_a", "msgbatch_b", "msgbatch_c"]

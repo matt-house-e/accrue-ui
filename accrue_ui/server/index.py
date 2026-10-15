@@ -176,6 +176,10 @@ class StepState:
     #: segments (a retry_failed segment re-opens the step and emits its own,
     #: shorter step_end; the main pass is the meaningful wall-clock).
     elapsed_s: float | None = None
+    #: Every provider batch job id the step submitted, in order, over all
+    #: segments: ``step_end.batch_ids`` (accrue#169), else the single legacy
+    #: ``batch_id``. A retry segment submits its own batch, so ids accumulate.
+    batch_ids: list[str] = field(default_factory=list)
     # --- retries (P22) ----------------------------------------------------
     #: row_attempt records with ``attempt > 1`` — attempts beyond the first for
     #: a (step, row), i.e. retries. The counter is monotonic 1-based per cell
@@ -802,6 +806,13 @@ class RunIndex:
             # a fresh, shorter step_end; the main pass is the wall-clock worth
             # showing, and the two segments do not overlap in wall time anyway.
             step.elapsed_s = max(step.elapsed_s or 0.0, float(elapsed))
+        ids = data.get("batch_ids")
+        if not isinstance(ids, list):
+            # Logs before accrue#169 name only the first batch.
+            ids = [data.get("batch_id")]
+        for bid in ids:
+            if isinstance(bid, str) and bid and bid not in step.batch_ids:
+                step.batch_ids.append(bid)
         usage = data.get("usage")
         if isinstance(usage, dict):
             tokens_in = usage.get("in") if isinstance(usage.get("in"), int) else 0
@@ -1144,6 +1155,9 @@ class RunIndex:
                         # step never retried (count == 0) so the card can omit
                         # the chip entirely.
                         "retry": self._step_retry(live) if live else None,
+                        # Provider batch job ids, in submission order; [] for
+                        # realtime steps and a batch that submitted nothing.
+                        "batch_ids": list(live.batch_ids) if live else [],
                     },
                 }
             )
