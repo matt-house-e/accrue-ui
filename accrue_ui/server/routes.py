@@ -85,6 +85,7 @@ async def get_rows(
     sort: str | None = None,
     sort_sub: str | None = None,
     facet: str | None = None,
+    facet_sub: str | None = None,
     only: str | None = None,
     run: str | None = None,
 ) -> dict:
@@ -105,6 +106,7 @@ async def get_rows(
             sort=sort,
             sort_sub=sort_sub,
             facet=facet,
+            facet_sub=facet_sub,
             only=only,
         )
     except QueryError as exc:

@@ -380,7 +380,10 @@ def test_sort_strings_case_folded_and_object_sub_key(rows_log: Path):
         assert revenue == [6, 4, 7, 5, 3, 0, 2, 1, 8, 9]
         by_source = _rows(client, sort="extract/revenue:asc", sort_sub="source")["rows"]
         assert by_source[:3] == [0, 1, 2]
-        assert by_source[-3:] == [6, 8, 9]  # row 6 is not an object: no source
+        # Row 6's plain string is itself under any sub-key (what its cell
+        # shows) and sorts after the "https://…" and "no-value-key" sources;
+        # 8 and 9 are unknown.
+        assert by_source[-3:] == [6, 8, 9]
 
 
 def test_sort_by_state_uses_the_explicit_rank(rows_log: Path):
@@ -427,6 +430,18 @@ def test_facet_only_skips_the_row_list_and_counts_empty(rows_log: Path):
     assert (
         len(body["facet"]["values"]) == 6
     )  # four "$…", no-value-key, the plain string
+
+
+def test_facet_counts_on_the_requested_sub_key(rows_log: Path):
+    """The grid facets a column on the sub-key it shows — the same key its
+    clause will carry — so a count says what ticking that box yields."""
+    with client_for(rows_log) as client:
+        body = _rows(client, facet="extract/revenue", facet_sub="source", only="facet")
+    # Every object has a source, and row 6's plain string is itself under any
+    # sub-key: eight settled rows, eight distinct values, nothing empty.
+    assert body["facet"]["empty"] == 0
+    assert len(body["facet"]["values"]) == 8
+    assert all(n == 1 for _, n in body["facet"]["values"])
 
 
 # ------------------------------------------------------------ bad input

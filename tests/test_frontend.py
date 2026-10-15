@@ -508,7 +508,8 @@ def test_filters_are_typed_from_the_manifest():
     assert "NUMERIC_TYPES.has(spec.type)" in filters
     for op in ("empty", "notempty", "in", "range", "contains", "eq", "regex", "state"):
         assert f'"{op}"' in filters, op
-    assert "loadFacet(col)" in filters  # enum counts come from the server
+    # Enum counts come from the server, on the sub-key the column shows.
+    assert "loadFacet(col, sub)" in filters
     # Object-valued columns filter on the sub-key the column shows.
     assert "if (clause && sub) clause.sub = sub;" in filters
 

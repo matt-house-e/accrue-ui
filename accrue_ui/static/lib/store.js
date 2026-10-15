@@ -529,7 +529,7 @@ export function queryClauses() {
   return clauses;
 }
 
-export function queryParams({ facet = null } = {}) {
+export function queryParams({ facet = null, facetSub = null } = {}) {
   const p = new URLSearchParams();
   const q = searchQuery.value.trim();
   if (q) {
@@ -545,6 +545,7 @@ export function queryParams({ facet = null } = {}) {
   }
   if (facet) {
     p.set("facet", facet);
+    if (facetSub) p.set("facet_sub", facetSub);
     p.set("only", "facet");
   }
   return p.toString();
@@ -603,12 +604,14 @@ export async function loadRows() {
   }
 }
 
-// Value counts for one column, for its checkbox facets. The full query goes
+// Value counts for one column, for its checkbox facets — on the sub-key the
+// column shows when it is object-valued, the same key its clause will carry,
+// so each count says what ticking that box would yield. The full query goes
 // along; the server counts over the rows matching every OTHER clause, leaving
 // the column's own out (docs/api-shapes.md, `facet=`).
-export async function loadFacet(col) {
+export async function loadFacet(col, sub = null) {
   try {
-    const res = await fetch(apiPath(`/api/rows?${queryParams({ facet: col })}`));
+    const res = await fetch(apiPath(`/api/rows?${queryParams({ facet: col, facetSub: sub })}`));
     if (!res.ok) return null;
     const data = await res.json();
     return data.facet || null;

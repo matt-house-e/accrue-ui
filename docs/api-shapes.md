@@ -496,7 +496,9 @@ pseudo-column, and `*` is "any step" — valid with the `state` op only.
   reflects every clause. `only=facet` skips the row list (`rows: []`,
   `matched: null`). Buckets are JSON scalars; a list or object bucket is its
   JSON text. A manifest enum member no row carries is simply absent — the
-  client fills zeros.
+  client fills zeros. `facet_sub` names the sub-key for an object-valued
+  facet column, as `sub` does for a clause: the grid sends the sub-key the
+  column shows, so each count says what ticking that box would yield.
 
 **Semantics the grid relies on.**
 

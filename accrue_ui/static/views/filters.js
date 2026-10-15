@@ -137,12 +137,12 @@ function FilterEditor({ col, step, field, spec, close }) {
   const [text, setText] = useState(current && typeof current.v === "string" ? current.v : "");
   const [facet, setFacet] = useState(null);
   const facets = kind === "enum" || kind === "bool";
-  useEffect(() => {
-    if (facets) loadFacet(col).then(setFacet);
-  }, [col]);
-
-  // Object-valued column: the filter applies to the sub-key the column shows.
+  // Object-valued column: the filter, and the facet counts, apply to the
+  // sub-key the column shows.
   const sub = subKeysFor(step, field) ? selectedSubKey(step, field) : null;
+  useEffect(() => {
+    if (facets) loadFacet(col, sub).then(setFacet);
+  }, [col, sub]);
 
   const apply = (e) => {
     if (e) e.preventDefault();

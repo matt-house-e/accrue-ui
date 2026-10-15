@@ -14,8 +14,8 @@ Semantics the grid relies on (docs/api-shapes.md, ``GET /api/rows``):
 - **A field the run never produced is missing everywhere**, never a 400: a
   filter restored from the URL hash must survive a live run whose rows have
   not reached that field yet, and the index itself tolerates growing logs.
-- **Object-valued fields filter and sort on one sub-key** — the clause's
-  ``sub``, else the object's own default (the same rule ``_render_field``
+- **Object-valued fields filter, sort and facet on one sub-key** — the
+  clause's ``sub`` (``sort_sub`` / ``facet_sub``), else the object's own default (the same rule ``_render_field``
   uses to pick what the cell shows). A sub-key the object lacks is missing,
   never a fallback onto another key.
 - **Unknown sorts last in both directions**, and the sort is stable over
@@ -89,6 +89,7 @@ class QuerySpec:
     clauses: list[Clause] = field(default_factory=list)
     sort: tuple[str, str | None, str, str | None] | None = None  # step, field, dir, sub
     facet: tuple[str, str] | None = None
+    facet_sub: str | None = None  # sub-key to count an object-valued facet on
     only_facet: bool = False
 
     @property
@@ -105,6 +106,7 @@ class QuerySpec:
             ),
             self.sort,
             self.facet,
+            self.facet_sub,
             self.only_facet,
         )
 
@@ -230,6 +232,7 @@ def parse_query(
     sort: str | None = None,
     sort_sub: str | None = None,
     facet: str | None = None,
+    facet_sub: str | None = None,
     only: str | None = None,
 ) -> QuerySpec:
     spec = QuerySpec(
@@ -243,6 +246,7 @@ def parse_query(
         if fld is None or step == ANY_STEP:
             raise QueryError('facet must name a field column ("step/field")')
         spec.facet = (step, fld)
+        spec.facet_sub = facet_sub or None
     if only is not None and only != "":
         if only != "facet":
             raise QueryError('only must be "facet"')
@@ -481,7 +485,7 @@ def _select(index: RunIndex, spec: QuerySpec) -> dict[str, Any]:
         if not all(view.clause_hit(c, r) for c in others):
             continue
         if facet_col is not None:
-            v = view.value(r, facet_col[0], facet_col[1], None)
+            v = view.value(r, facet_col[0], facet_col[1], spec.facet_sub)
             if v is not UNKNOWN:
                 if is_empty(v):
                     facet_empty += 1
