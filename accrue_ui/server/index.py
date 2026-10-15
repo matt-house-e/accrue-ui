@@ -900,9 +900,8 @@ class RunIndex:
 
         One entry per field the step produced (``_render_field``), so the
         data grid can show whichever field the column's field-chip currently
-        selects. ``None`` for cells with
-        nothing to render (error/retrying/pending/skipped, or no values at
-        all).
+        selects. ``None`` for cells with nothing to render
+        (error/retrying/pending/skipped, or no values at all).
 
         ``__``-internal fields are **included**, unlike ``preview``: the
         snapshot's ``steps[].fields`` already names them, and the UI's "show
