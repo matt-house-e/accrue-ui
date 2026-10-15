@@ -324,7 +324,12 @@ what `steps[]` alone gives rather than crashing. When present:
             "status": "rate_limited",
             "count": 41
           }
-        }
+        },
+        "batch_ids": []            // provider batch job ids, in submission
+                                   // order over every segment (deduped):
+                                   // step_end.batch_ids, else [batch_id] for
+                                   // logs before accrue#169. [] for realtime
+                                   // steps and a batch that submitted nothing
       }
     }
   ],
@@ -332,6 +337,12 @@ what `steps[]` alone gives rather than crashing. When present:
     {
       "name": "icp_fit",
       "type": "enum",              // "str" | "int" | "enum" | ... | "unknown"
+      "type_mismatch": null,       // list | null: JSON kinds ("str" | "number"
+                                   // | "bool" | "list" | "object") seen in the
+                                   // step's ok/cached values that `type` does
+                                   // not allow, sorted. null when they all fit
+                                   // or nothing is known; json/unknown allow
+                                   // anything, nulls are ignored
       "enum": ["strong", "good", "weak"],  // list | null (only for enum types)
       "description": "Fit as a customer for a developer-tools startup.",  // string | null
       "step": "assess",            // the producing step
@@ -348,6 +359,9 @@ what `steps[]` alone gives rather than crashing. When present:
   be priced — an em-dash, never `$0.00`).
 - `type` is `"unknown"` for a step or field accrue could not introspect; render
   it plainly rather than hiding it.
+- `fields[].type_mismatch` exists for logs whose manifest predates
+  accrue#170, which declared a custom schema's nested `{value, source}` field
+  as `str`; the Overview marks the field. Kinds are sticky for the run.
 - `sample_size` is the declared `num_rows`, falling back to the widest row
   index seen if the log never declared one.
 - `outcome.latency_ms` percentiles are computed over the same per-row
