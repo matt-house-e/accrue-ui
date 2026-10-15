@@ -47,6 +47,13 @@ STATE_NAMES = ("pending", "running", "ok", "cached", "retrying", "error", "skipp
 TERMINAL = frozenset({OK, CACHED, ERROR, SKIPPED})
 
 PREVIEW_MAX_CHARS = 160
+#: Widest object split per sub-key in the ``/api/values`` field map. Each
+#: sub-value costs up to PREVIEW_MAX_CHARS, so splitting a 200-key ``json``
+#: field would turn one 160-char preview into ~36KB per cell, both in this
+#: index and on every values page. A record like ``{value, source}`` is
+#: narrow; anything wider than this is a map and keeps the one-dump preview.
+#: Matches the grid's SUBKEYS_CAP (static/lib/store.js).
+SUBKEYS_MAX = 32
 HISTOGRAM_BUCKETS = 22
 BURST_MIN_COUNT = 10
 BURST_MAX_SPAN_S = 240.0
@@ -838,18 +845,19 @@ class RunIndex:
     def _render_field(value: Any) -> Any:
         """A field's entry in the ``/api/values`` field map.
 
-        Scalars, lists and ``{}`` render as ``_render_value`` does. A
-        non-empty object becomes ``{"o": {sub_key: preview}, "d": default}``
-        instead of one truncated JSON dump: a dump cut at 160 characters
-        can't be parsed, so the grid could never pick a sub-key out of it
-        (accrue-ui#36). Each sub-value is truncated on its own, which keeps
-        the wire bound. ``d`` is the sub-key the grid shows when the column
+        Scalars, lists, ``{}`` and objects wider than ``SUBKEYS_MAX`` render
+        as ``_render_value`` does. Any other object becomes
+        ``{"o": {sub_key: preview}, "d": default}`` instead of one truncated
+        JSON dump: a dump cut at 160 characters can't be parsed, so the grid
+        could never pick a sub-key out of it (accrue-ui#36). Each sub-value is
+        truncated on its own and the width is capped, which keeps the wire
+        bound. ``d`` is the sub-key the grid shows when the column
         has no choice of its own: ``value`` when present, else the first
         sub-key holding a scalar, else the first. It is picked here because
         only the server still knows the raw types — once rendered, a nested
         object and a string starting with ``{`` look the same.
         """
-        if not isinstance(value, dict) or not value:
+        if not isinstance(value, dict) or not value or len(value) > SUBKEYS_MAX:
             return RunIndex._render_value(value)
         subs = {str(k): RunIndex._render_value(v) for k, v in value.items()}
         if "value" in value:

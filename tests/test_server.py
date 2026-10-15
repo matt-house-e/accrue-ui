@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from accrue_ui.server.index import SUBKEYS_MAX
 from tests.conftest import age_file, client_for, row, write_log
 
 PENDING, RUNNING, OK, CACHED, RETRYING, ERROR, SKIPPED = range(7)
@@ -474,6 +475,10 @@ def test_values_field_map_splits_nested_objects_by_sub_key(tmp_path: Path):
         "nothing": None,
         "blank": "",
         "null_inside": {"value": None, "source": "registry"},
+        # A map wider than SUBKEYS_MAX stays one dump: split, each sub-value
+        # would cost up to 160 chars and the entry would grow with its width.
+        "wide": {f"k{i}": "x" * 300 for i in range(SUBKEYS_MAX + 1)},
+        "widest_split": {f"k{i}": i for i in range(SUBKEYS_MAX)},
     }
     write_log(
         log,
@@ -508,6 +513,9 @@ def test_values_field_map_splits_nested_objects_by_sub_key(tmp_path: Path):
     # Empty objects and lists keep the plain string rendering.
     assert f["empty_obj"] == "{}"
     assert f["listed"] == "[1, 2]"
+    # Width cap: one past it is a single bounded dump, at it still splits.
+    assert isinstance(f["wide"], str) and len(f["wide"]) == 160
+    assert len(f["widest_split"]["o"]) == SUBKEYS_MAX
     # null and "" stay distinguishable, at both levels.
     assert f["nothing"] is None
     assert f["blank"] == ""

@@ -61,7 +61,7 @@ const VALUES_CAP = 2000;
 // the server named. Grown as values load rather than scanned from the cache
 // on every render — a live run re-renders the column heads ~10x/second.
 const subKeysSeen = new Map();
-const SUBKEYS_CAP = 32;
+const SUBKEYS_CAP = 32; // the server's SUBKEYS_MAX; here it caps the union across rows
 
 function noteSubKeys(row) {
   for (const [stepName, cell] of Object.entries(row.cells || {})) {

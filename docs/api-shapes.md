@@ -407,8 +407,9 @@ over-wide window is a refetch loop, not a retry.
   of `f`, not assume `v` tracks the selection.
 
   An entry is a string, `null` (the field's value **was** `null`: distinct
-  from `""`, and from a field absent from the map), or — for a non-empty
-  object value — `{"o": {sub_key: preview}, "d": sub_key}` (accrue-ui#36):
+  from `""`, and from a field absent from the map), or — for an object value
+  with 1–32 sub-keys — `{"o": {sub_key: preview}, "d": sub_key}`
+  (accrue-ui#36):
 
   ```jsonc
   "revenue": { "o": { "value": "$12M", "source": "https://…" }, "d": "value" }
@@ -418,7 +419,9 @@ over-wide window is a refetch loop, not a retry.
   nested object or list under it is a JSON dump; `null` stays `null`). `d`
   is the sub-key to show when the column has no choice of its own: `value`
   when present, else the first sub-key holding a scalar, else the first.
-  `{}` and lists render as plain JSON strings.
+  `{}`, lists, and objects with more than 32 sub-keys render as plain JSON
+  strings. A wider object is a map rather than a record, and splitting it
+  would multiply the entry's size by its width.
 - `s` — the cell-state byte, same encoding as `cells.data`.
 
 ## `GET /api/cell/{step}/{row}`
