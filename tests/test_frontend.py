@@ -31,7 +31,11 @@ STATIC_FILES = [
     "lib/store.js",
     "lib/sse.js",
     "lib/tooltip.js",
+    "lib/popover.js",
+    "views/columns.js",
+    "views/filters.js",
     "views/grid.js",
+    "views/overview.js",
     "views/inspector.js",
     "views/triage.js",
     "views/cost.js",
@@ -404,16 +408,21 @@ def test_values_fetching_pages_and_cannot_feed_itself():
     the fetch must ask only for uncached rows in server-sized pages.
     """
     grid = (STATIC / "views" / "grid.js").read_text()
-    memo_deps = grid.split("computeRows(arr, nsteps, filter, query)", 1)[1]
+    memo_deps = grid.split("computeRows(arr, nsteps, sr, active)", 1)[1]
     memo_deps = memo_deps.split("]", 1)[0]
     assert "vversion" not in memo_deps
-    assert "VALUES_PAGE_MAX = 1000" in grid  # matches the server's clamp
-    assert "missingWindows" in grid
+    # Values are asked for by explicit row list — a sorted or filtered grid
+    # shows scattered rows — paged at the server's cap (accrue-ui#37).
+    store = (STATIC / "lib" / "store.js").read_text()
+    assert "VALUES_PAGE_MAX = 1000" in store  # matches the server's clamp
+    assert "/api/values?rows=" in store
+    assert "missingRows" in grid
     assert "!valuesCache.has(r)" in grid
     # The fetch effect keys off the row SET, not every cell-state bump.
     effect_deps = grid.split("}, 150);", 1)[1].split("[", 1)[1].split("]", 1)[0]
     assert "version" not in effect_deps
-    assert "rows.length" in effect_deps
+    # The row list's identity: a re-sort with the same count must refetch.
+    assert "rows" in effect_deps
 
 
 def test_grid_clamps_the_first_visible_row():
@@ -431,11 +440,12 @@ def test_nested_values_show_one_sub_key_and_hover_the_rest():
     """
     grid = (STATIC / "views" / "grid.js").read_text()
     store = (STATIC / "lib" / "store.js").read_text()
-    assert "v.o[subKeyOf(stepName, v)]" in grid
+    assert "v.o[subKeyOf(stepName, field, v)]" in grid
     assert "data-tip=${tip}" in grid  # the whole object, one sub-key per line
     assert "cycleSubKey(step, field)" in grid
     assert "choice in entry.o ? choice : entry.d" in store
-    assert "subKeyChoice.value[stepName]" in store  # keyed by column only
+    # Keyed per column — one column per field since accrue-ui#37.
+    assert "subKeyChoice.value[colId(stepName, field)]" in store
     assert "subKeysSeen.clear()" in store  # another run's keys don't linger
     assert "noteSubKeys(row)" in store  # grown on load, not scanned per render
 
@@ -453,8 +463,63 @@ def test_null_renders_distinct_from_an_empty_string():
     assert ".values-table td.value.json { white-space: pre-wrap; }" in css
 
 
-def test_search_placeholder_admits_the_cache_limit():
-    assert 'placeholder="Search loaded keys…"' in (STATIC / "app.js").read_text()
+def test_search_filter_and_sort_are_one_server_query():
+    """The grid shows exactly /api/rows' list whenever a query is active
+    (accrue-ui#37): nothing is filtered client-side, so the summary line and
+    the grid cannot disagree — the global state chips ride the same request
+    as an any-step clause."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    filters = (STATIC / "views" / "filters.js").read_text()
+    grid = (STATIC / "views" / "grid.js").read_text()
+    assert "/api/rows?" in store
+    assert 'placeholder="Search values…"' in filters  # no "loaded keys" limit
+    assert 'clauses.push({ col: "*", op: "state", v: [want] })' in store
+    assert "Search loaded keys" not in (STATIC / "app.js").read_text()
+    # Active query, no answer yet: an empty list, not an unfiltered flash.
+    assert "if (active) return sr ? sr.rows.filter((r) => r < total) : [];" in grid
+    # A stale response never overwrites a newer request's answer.
+    assert "if (seq !== rowsSeq) return;" in store
+    # A failed query keeps the last good list and says so.
+    assert "rowsError.value = message;" in store
+    assert "rowsError.value" in filters
+    # Cell deltas mark the list stale rather than re-sorting under the reader.
+    assert "if (serverRows.value) rowsStale.value = true;" in store
+    assert "Results may be stale" in filters
+
+
+def test_query_state_round_trips_through_the_url_hash():
+    """A reload or a shared link restores the view (accrue-ui#37)."""
+    store = (STATIC / "lib" / "store.js").read_text()
+    app_js = (STATIC / "app.js").read_text()
+    for key in ('"q"', '"in"', '"f"', '"sort"', '"rows"', '"hide"', '"wrap"', '"view"'):
+        assert f"p.set({key}" in store, key
+        assert f"p.get({key})" in store or f"p.has({key})" in store, key
+    assert "history.replaceState" in store
+    # Read before the first snapshot fetch, and never written before read.
+    boot = app_js.split("readHash();", 1)[1]
+    assert "loadRun()" in boot.split("connect()", 1)[0]
+    assert "if (!hashReady" in store
+
+
+def test_filters_are_typed_from_the_manifest():
+    filters = (STATIC / "views" / "filters.js").read_text()
+    assert 'spec.type === "enum"' in filters
+    assert 'spec.type === "bool"' in filters
+    assert "NUMERIC_TYPES.has(spec.type)" in filters
+    for op in ("empty", "notempty", "in", "range", "contains", "eq", "regex", "state"):
+        assert f'"{op}"' in filters, op
+    # Enum counts come from the server, on the sub-key the column shows.
+    assert "loadFacet(col, sub)" in filters
+    # Object-valued columns filter on the sub-key the column shows.
+    assert "if (clause && sub) clause.sub = sub;" in filters
+
+
+def test_rows_fixture_shape():
+    doc = json.loads((FIXTURES / "rows.json").read_text())
+    assert set(doc) == {"rows", "total", "matched"}
+    assert doc["matched"] == len(doc["rows"])
+    run = _run_doc()
+    assert all(0 <= r < run["rows"]["total"] for r in doc["rows"])
 
 
 def test_error_groups_refetch_when_a_delta_moves_the_error_count():

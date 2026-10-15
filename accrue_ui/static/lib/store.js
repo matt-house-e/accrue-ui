@@ -1,6 +1,6 @@
 // Signals-based state store + fetch helpers. All requests are same-origin
 // relative /api/* paths (see docs/api-shapes.md).
-import { signal, batch } from "@preact/signals";
+import { signal, batch, effect } from "@preact/signals";
 
 export const STATE = {
   PENDING: 0,
@@ -33,11 +33,26 @@ export const activeTab = signal("grid"); // 'grid' | 'overview' | 'errors' | 'co
 export const rowFilter = signal("all"); // 'all' | 'errors' | 'retrying' | 'skipped'
 export const searchQuery = signal("");
 export const showInternalFields = signal(false);
-export const fieldChoice = signal({}); // stepName -> selected field name
-// stepName -> the sub-key its data column shows for object-valued fields.
-// Per column, not per field: one choice covers every {value, source} field
-// the field-chip cycles through (accrue-ui#36).
+// colId ("step/field") -> the sub-key that data column shows for object-valued
+// fields (accrue-ui#36). Per column: with one column per field (accrue-ui#37)
+// a per-step choice would flip the other 48 columns on one click.
 export const subKeyChoice = signal({});
+// ---- data-grid layout (accrue-ui#37) -----------------------------------
+export const hiddenCols = signal([]); // colIds the column picker hid
+export const wrapCells = signal(false); // truncate (one line) | wrap (3 lines)
+export const colWidths = signal({}); // colId -> px; memory only, not in the hash
+// ---- query: search, filters, sort (accrue-ui#37) -----------------------
+// The server answers /api/rows whenever any of these is set; the grid then
+// shows exactly its row list (docs/api-shapes.md).
+export const columnFilters = signal({}); // colId -> {op, v?, sub?}
+export const sortSpec = signal(null); // {col, dir, sub?} | null
+export const searchScope = signal("all"); // "all" | "keys" | colId
+export const serverRows = signal(null); // {rows, total, matched} | null
+export const rowsError = signal(null); // string | null: the last query failed
+export const rowsLoading = signal(false);
+export const rowsStale = signal(false); // cells changed since the last query
+// The global state chips, as the server clause they ride (any step).
+export const FILTER_STATE = { errors: 5, retrying: 4, skipped: 6 };
 export const sseStatus = signal("idle"); // 'idle' | 'connected'
 export const cellDetail = signal(null); // /api/cell payload for selection
 export const cellDetailLoading = signal(false);
@@ -99,20 +114,16 @@ export function stateAt(row, stepIndex) {
   return arr[row * stepCount() + stepIndex];
 }
 
+// Column identity for the data grid: one column per (step, field); a bare
+// step name is the step's state column (docs/api-shapes.md, /api/rows).
+export function colId(stepName, field) {
+  return field == null ? stepName : `${stepName}/${field}`;
+}
+
 // Visible (non-internal unless toggled) field list for a step.
 export function stepFields(step) {
   const fields = step.fields || [];
   return showInternalFields.value ? fields : fields.filter((f) => !f.startsWith("__"));
-}
-
-// The field a step's data column is currently showing: the chip's choice,
-// but only while it is still visible. Cycling onto an internal field and
-// then hiding internal fields would otherwise leave the column rendering a
-// field the toggle says is hidden — fall back to the first visible one.
-export function selectedField(step) {
-  const fields = stepFields(step);
-  const choice = fieldChoice.value[step.name];
-  return choice && fields.includes(choice) ? choice : fields[0] || null;
 }
 
 // The sub-keys seen under a step's object-valued field, or null when no
@@ -128,14 +139,14 @@ export function subKeysFor(stepName, field) {
 export function selectedSubKey(stepName, field) {
   const seen = subKeysFor(stepName, field);
   if (!seen) return null;
-  const choice = subKeyChoice.value[stepName];
+  const choice = subKeyChoice.value[colId(stepName, field)];
   return choice && seen.keys.includes(choice) ? choice : seen.d;
 }
 
 // The sub-key one cell shows for its {o, d} entry: the column's choice when
 // this object has it — rows need not share keys — else its own default.
-export function subKeyOf(stepName, entry) {
-  const choice = subKeyChoice.value[stepName];
+export function subKeyOf(stepName, field, entry) {
+  const choice = subKeyChoice.value[colId(stepName, field)];
   return choice && choice in entry.o ? choice : entry.d;
 }
 
@@ -219,22 +230,35 @@ function forgetRun() {
   selection.value = null;
   cellDetail.value = null;
   retryError.value = null;
+  // The query inputs stay (they are hash state); the answer belonged to the
+  // old run's rows.
+  serverRows.value = null;
+  scheduleRows(0);
 }
 
-const pendingWindows = new Set();
+// Rows with a request in flight, so two renders never ask twice.
+const pendingRows = new Set();
+// /api/values?rows= serves at most this many per request (docs/api-shapes.md).
+export const VALUES_PAGE_MAX = 1000;
 
-export async function loadValues(start, count) {
-  const key = `${start}:${count}`;
-  if (pendingWindows.has(key)) return;
-  pendingWindows.add(key);
+// Values for an explicit row list — the visible rows, in whatever order a
+// sort or filter put them (accrue-ui#37). A contiguous window could not
+// serve a sorted grid without paging most of the run.
+export async function loadValuesFor(rows) {
+  const want = rows.filter((r) => !pendingRows.has(r));
+  if (!want.length) return;
+  for (const r of want) pendingRows.add(r);
   try {
-    const res = await fetch(apiPath(`/api/values?start=${start}&count=${count}`));
-    if (!res.ok) return;
-    const data = await res.json();
-    for (const row of data.rows || []) {
-      valuesCache.delete(row.row); // refresh position for LRU-ish eviction
-      valuesCache.set(row.row, row);
-      noteSubKeys(row);
+    for (let i = 0; i < want.length; i += VALUES_PAGE_MAX) {
+      const page = want.slice(i, i + VALUES_PAGE_MAX);
+      const res = await fetch(apiPath(`/api/values?rows=${page.join(",")}`));
+      if (!res.ok) continue;
+      const data = await res.json();
+      for (const row of data.rows || []) {
+        valuesCache.delete(row.row); // refresh position for LRU-ish eviction
+        valuesCache.set(row.row, row);
+        noteSubKeys(row);
+      }
     }
     while (valuesCache.size > VALUES_CAP) {
       valuesCache.delete(valuesCache.keys().next().value);
@@ -243,7 +267,7 @@ export async function loadValues(start, count) {
   } catch {
     // dev stub / offline: values stay unloaded, grid shows indices only
   } finally {
-    pendingWindows.delete(key);
+    for (const r of want) pendingRows.delete(r);
   }
 }
 
@@ -352,20 +376,19 @@ export function closeInspector() {
   cellDetail.value = null;
 }
 
-export function cycleField(step) {
-  const fields = stepFields(step);
-  if (fields.length < 2) return;
-  const current = selectedField(step);
-  const next = fields[(fields.indexOf(current) + 1) % fields.length];
-  fieldChoice.value = { ...fieldChoice.value, [step.name]: next };
-}
-
 export function cycleSubKey(step, field) {
   const seen = subKeysFor(step.name, field);
   if (!seen || seen.keys.length < 2) return;
   const current = selectedSubKey(step.name, field);
   const next = seen.keys[(seen.keys.indexOf(current) + 1) % seen.keys.length];
-  subKeyChoice.value = { ...subKeyChoice.value, [step.name]: next };
+  subKeyChoice.value = { ...subKeyChoice.value, [colId(step.name, field)]: next };
+}
+
+export function toggleColumn(id) {
+  const hidden = hiddenCols.value;
+  hiddenCols.value = hidden.includes(id)
+    ? hidden.filter((h) => h !== id)
+    : [...hidden, id];
 }
 
 // Deltas carry cell states and counters — never error_groups. During a live
@@ -424,6 +447,10 @@ export function applyDelta(delta) {
         else if (!inGrid) gap = true;
       }
       cellsVersion.value++;
+      // A filtered or sorted list was computed over cells that just moved.
+      // Say so rather than re-query: re-sorting under the reader every flush
+      // would yank rows out from under them (the live behaviour is #53).
+      if (serverRows.value) rowsStale.value = true;
     }
     if (snap && delta.stats && Object.keys(delta.stats).length) {
       // rows_done and live are the delta-only stats keys: they belong to
@@ -474,3 +501,227 @@ export function applyDelta(delta) {
       });
   }
 }
+
+// ---- query: /api/rows -----------------------------------------------------
+//
+// Search, per-column filters, sort and the global state chip all become one
+// server query (docs/api-shapes.md, GET /api/rows); the grid shows exactly
+// the row list it returns. Nothing is filtered client-side any more, so the
+// summary line and the grid can never disagree.
+
+export function queryActive() {
+  return !!(
+    searchQuery.value.trim() ||
+    Object.keys(columnFilters.value).length ||
+    sortSpec.value ||
+    rowFilter.value !== "all"
+  );
+}
+
+// The filter clauses, in the server's shape.
+export function queryClauses() {
+  const clauses = [];
+  for (const [col, f] of Object.entries(columnFilters.value)) {
+    clauses.push({ col, ...f });
+  }
+  const want = FILTER_STATE[rowFilter.value];
+  if (want !== undefined) clauses.push({ col: "*", op: "state", v: [want] });
+  return clauses;
+}
+
+export function queryParams({ facet = null, facetSub = null } = {}) {
+  const p = new URLSearchParams();
+  const q = searchQuery.value.trim();
+  if (q) {
+    p.set("q", q);
+    if (searchScope.value !== "all") p.set("scope", searchScope.value);
+  }
+  const clauses = queryClauses();
+  if (clauses.length) p.set("filter", JSON.stringify(clauses));
+  const s = sortSpec.value;
+  if (s) {
+    p.set("sort", `${s.col}:${s.dir}`);
+    if (s.sub) p.set("sort_sub", s.sub);
+  }
+  if (facet) {
+    p.set("facet", facet);
+    if (facetSub) p.set("facet_sub", facetSub);
+    p.set("only", "facet");
+  }
+  return p.toString();
+}
+
+export const ROWS_DEBOUNCE_MS = 200;
+let rowsSeq = 0; // a response older than the latest request is dropped
+let rowsTimer = null;
+
+export function scheduleRows(delay = ROWS_DEBOUNCE_MS) {
+  clearTimeout(rowsTimer);
+  rowsTimer = setTimeout(() => {
+    rowsTimer = null;
+    loadRows();
+  }, delay);
+}
+
+export async function loadRows() {
+  const seq = ++rowsSeq;
+  if (!queryActive()) {
+    batch(() => {
+      serverRows.value = null;
+      rowsError.value = null;
+      rowsLoading.value = false;
+      rowsStale.value = false;
+    });
+    return;
+  }
+  rowsLoading.value = true;
+  try {
+    const res = await fetch(apiPath(`/api/rows?${queryParams()}`));
+    if (seq !== rowsSeq) return;
+    if (!res.ok) {
+      // Keep the last good list on screen; say what went wrong beside it.
+      let message = `query failed (${res.status})`;
+      try {
+        const payload = await res.json();
+        message = payload.detail || message;
+      } catch {
+        // non-JSON error body: keep the status-code message
+      }
+      rowsError.value = message;
+      return;
+    }
+    const data = await res.json();
+    if (seq !== rowsSeq) return;
+    batch(() => {
+      serverRows.value = data;
+      rowsError.value = null;
+      rowsStale.value = false;
+    });
+  } catch (e) {
+    if (seq === rowsSeq) rowsError.value = String(e);
+  } finally {
+    if (seq === rowsSeq) rowsLoading.value = false;
+  }
+}
+
+// Value counts for one column, for its checkbox facets — on the sub-key the
+// column shows when it is object-valued, the same key its clause will carry,
+// so each count says what ticking that box would yield. The full query goes
+// along; the server counts over the rows matching every OTHER clause, leaving
+// the column's own out (docs/api-shapes.md, `facet=`).
+export async function loadFacet(col, sub = null) {
+  try {
+    const res = await fetch(apiPath(`/api/rows?${queryParams({ facet: col, facetSub: sub })}`));
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.facet || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setFilter(col, clause) {
+  const next = { ...columnFilters.value };
+  if (clause) next[col] = clause;
+  else delete next[col];
+  columnFilters.value = next;
+}
+
+export function setSort(col, dir, sub = null) {
+  sortSpec.value = dir ? { col, dir, ...(sub ? { sub } : {}) } : null;
+}
+
+export function clearQuery() {
+  batch(() => {
+    searchQuery.value = "";
+    searchScope.value = "all";
+    columnFilters.value = {};
+    sortSpec.value = null;
+    rowFilter.value = "all";
+  });
+}
+
+// Any input change re-queries, debounced. effect() tracks only what is read
+// synchronously here, so loadRows' own reads (apiPath -> selectedRun) do not
+// re-arm it.
+effect(() => {
+  searchQuery.value;
+  searchScope.value;
+  columnFilters.value;
+  sortSpec.value;
+  rowFilter.value;
+  scheduleRows();
+});
+
+// ---- URL hash: the query is a bookmark ------------------------------------
+//
+// #q=&in=&f=<json>&sort=&sub=&rows=&hide=&wrap=1&view=data. Written with
+// replaceState (no history entry per keystroke) and read once at boot, before
+// the first loadRun, so a reload or a shared link restores the same view. The
+// launch-token scrub in app.js keeps the hash.
+
+let hashReady = false; // readHash() has run: writing before it would erase it
+
+export function hashFor() {
+  const p = new URLSearchParams();
+  const q = searchQuery.value.trim();
+  if (q) p.set("q", q);
+  if (searchScope.value !== "all") p.set("in", searchScope.value);
+  const filters = columnFilters.value;
+  if (Object.keys(filters).length) p.set("f", JSON.stringify(filters));
+  const s = sortSpec.value;
+  if (s) {
+    p.set("sort", `${s.col}:${s.dir}`);
+    if (s.sub) p.set("sub", s.sub);
+  }
+  if (rowFilter.value !== "all") p.set("rows", rowFilter.value);
+  if (hiddenCols.value.length) p.set("hide", hiddenCols.value.join(","));
+  if (wrapCells.value) p.set("wrap", "1");
+  if (viewMode.value === "data") p.set("view", "data");
+  return p.toString();
+}
+
+export function readHash() {
+  try {
+    const raw = window.location.hash.replace(/^#/, "");
+    if (!raw) return;
+    const p = new URLSearchParams(raw);
+    batch(() => {
+      if (p.has("q")) searchQuery.value = p.get("q");
+      if (p.has("in")) searchScope.value = p.get("in");
+      if (p.has("f")) {
+        try {
+          const f = JSON.parse(p.get("f"));
+          if (f && typeof f === "object" && !Array.isArray(f)) columnFilters.value = f;
+        } catch {
+          // a hand-edited hash: ignore the filters, keep the rest
+        }
+      }
+      const sort = p.get("sort");
+      const m = sort && /^(.+):(asc|desc)$/.exec(sort);
+      if (m) sortSpec.value = { col: m[1], dir: m[2], ...(p.get("sub") ? { sub: p.get("sub") } : {}) };
+      const chip = p.get("rows");
+      if (chip && (chip === "all" || chip in FILTER_STATE)) rowFilter.value = chip;
+      if (p.has("hide")) hiddenCols.value = p.get("hide").split(",").filter(Boolean);
+      if (p.get("wrap") === "1") wrapCells.value = true;
+      if (p.get("view") === "data") viewMode.value = "data";
+    });
+  } finally {
+    hashReady = true;
+  }
+}
+
+export function writeHash(hash) {
+  if (!hashReady || typeof window === "undefined") return;
+  try {
+    const { pathname, search } = window.location;
+    const url = `${pathname}${search}${hash ? `#${hash}` : ""}`;
+    if (url !== `${pathname}${search}${window.location.hash}`) {
+      window.history.replaceState(null, "", url);
+    }
+  } catch {
+    // No history API: the view still works, it just is not bookmarkable.
+  }
+}
+
+effect(() => writeHash(hashFor()));

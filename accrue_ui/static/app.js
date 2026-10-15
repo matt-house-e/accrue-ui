@@ -2,7 +2,7 @@
 import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { html } from "./lib/html.js";
-import { IconChevronDown, IconSearch } from "./lib/icons.js";
+import { IconChevronDown } from "./lib/icons.js";
 import {
   fmtDuration,
   fmtInt,
@@ -20,14 +20,17 @@ import {
   elapsedS,
   loadRun,
   loadRuns,
+  readHash,
   rowFilter,
-  searchQuery,
   selectedRun,
   selection,
   showInternalFields,
   snapshot,
   viewMode,
+  wrapCells,
 } from "./lib/store.js";
+import { ColumnPickerButton } from "./views/columns.js";
+import { FilterBar, SearchBox } from "./views/filters.js";
 import { Grid } from "./views/grid.js";
 import { Inspector } from "./views/inspector.js";
 import { Triage } from "./views/triage.js";
@@ -238,15 +241,16 @@ function TabRow({ snap }) {
           ${label}
         </button>`
       )}
-      <label class="search">
-        <${IconSearch} />
-        <input
-          type="text"
-          placeholder="Search loaded keys…"
-          value=${searchQuery.value}
-          onInput=${(e) => (searchQuery.value = e.target.value)}
-        />
-      </label>
+      <${SearchBox} />
+      ${mode === "data" && html`<${ColumnPickerButton} snap=${snap} />`}
+      ${mode === "data" &&
+      html`<button
+        class=${`chip${wrapCells.value ? " active" : ""}`}
+        title="Truncate values to one line, or wrap them to three"
+        onClick=${() => (wrapCells.value = !wrapCells.value)}
+      >
+        ${wrapCells.value ? "Wrap" : "Truncate"}
+      </button>`}
       ${mode === "data" &&
       html`<button
         class=${`chip${showInternalFields.value ? " active" : ""}`}
@@ -347,6 +351,10 @@ function App() {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    // The hash first: a reload or a shared link restores the same search,
+    // filters, sort and columns (accrue-ui#37), and the query it implies
+    // fires alongside the snapshot fetch.
+    readHash();
     loadRun()
       .then(() => {
         scrubTokenFromUrl();
@@ -382,6 +390,7 @@ function App() {
     <${TopBar} snap=${snap} />
     <${RunsBanner} snap=${snap} />
     <${TabRow} snap=${snap} />
+    ${tab === "grid" && html`<${FilterBar} />`}
     <${StatsStrip} snap=${snap} />
     ${tab === "grid" && html`<${Grid} />`}
     ${tab === "overview" && html`<${Overview} />`}

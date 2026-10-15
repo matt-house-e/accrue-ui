@@ -22,6 +22,7 @@ NSTEPS = 5
 
 BUILD_BUDGET_S = 5.0
 SNAPSHOT_BUDGET_S = 0.5
+ROWS_QUERY_BUDGET_S = 2.0
 
 
 def _build_scale_log(path: Path) -> None:
@@ -188,3 +189,26 @@ def test_values_window_mid_range(scale_log: Path):
     # sits under.
     assert row0["cells"]["step0"] == {"v": "v10000", "f": {"f": "v10000"}, "s": 2}
     assert row0["cells"]["step4"] == {"v": "v10000", "f": {"f": "v10000"}, "s": 2}
+
+
+def test_rows_query_scans_every_cell_under_budget(scale_log: Path):
+    """An all-fields search and a value sort walk all 100k cells per query.
+
+    The scan runs off the event loop (routes.py), so this bounds the
+    worker's wall-clock rather than protecting the tail — but a query the
+    grid fires on every keystroke still has to come back fast.
+    """
+    with client_for(scale_log) as client:
+        t0 = time.perf_counter()
+        hit = client.get("/api/rows?q=v1999").json()
+        search_s = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        sorted_ = client.get("/api/rows?sort=step0/f:desc").json()
+        sort_s = time.perf_counter() - t0
+    assert hit["total"] == NROWS
+    assert hit["rows"][:2] == [1999, 19990]  # "v1999" and "v19990"…
+    assert hit["matched"] == 11  # v1999, v19990..v19999
+    assert sorted_["rows"][0] == 9999  # "v9999" is the largest string
+    print(f"\n/api/rows search: {search_s * 1000:.0f}ms, sort: {sort_s * 1000:.0f}ms")
+    assert search_s < ROWS_QUERY_BUDGET_S
+    assert sort_s < ROWS_QUERY_BUDGET_S

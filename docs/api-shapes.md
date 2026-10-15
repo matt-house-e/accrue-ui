@@ -359,14 +359,21 @@ what `steps[]` alone gives rather than crashing. When present:
   an older log with no `row_attempt`/`step_end` simply reports `retry: null`
   and `latency_ms: null`.
 
-## `GET /api/values?start=A&count=N`
+## `GET /api/values?start=A&count=N` · `GET /api/values?rows=1,5,9`
 
-Windowed row values for the data render mode and row labels. `start` is a
-row index, `count` a row count; the server clamps to the log's bounds **and
-to 1000 rows per request**. A client whose visible window spans more than
-1000 row indices (a sparse filter over a large run) must therefore page —
-asking for the whole span returns a short answer, and re-asking for the same
-over-wide window is a refetch loop, not a retry.
+Row values for the data render mode and row labels. Two forms:
+
+- **Window** — `start` is a row index, `count` a row count; the server clamps
+  to the log's bounds **and to 1000 rows per request**. A client whose
+  visible window spans more than 1000 row indices must therefore page —
+  asking for the whole span returns a short answer, and re-asking for the
+  same over-wide window is a refetch loop, not a retry.
+- **Row list** (accrue-ui#37) — `rows` is a comma-separated list of row
+  indices, returned **in the order asked**, capped at the first 1000; indices
+  outside the log are dropped, duplicates are repeated, and a non-integer is
+  a 400. This is what a sorted or filtered grid uses: its visible rows are
+  scattered, and a contiguous window would page most of the run to fill a
+  screen. `start` is then the first requested index (0 for an empty list).
 
 ```jsonc
 {
@@ -423,6 +430,91 @@ over-wide window is a refetch loop, not a retry.
   strings. A wider object is a map rather than a record, and splitting it
   would multiply the entry's size by its width.
 - `s` — the cell-state byte, same encoding as `cells.data`.
+
+## `GET /api/rows?q=&scope=&filter=<json>&sort=<col>:<dir>&facet=<col>`
+
+Row indices matching a search, filter and sort over the **raw** cell values
+the index holds (accrue-ui#37). A pure read over the in-memory index — no
+accrue-core change, no run-log change. The grid uses it whenever a search,
+filter, sort or the global state chip is active, then pages values for the
+visible rows with `/api/values?rows=`.
+
+```jsonc
+// GET /api/rows?q=fintech&filter=[{"col":"assess/icp_fit","op":"in","v":["strong"]}]&sort=classify/confidence:desc
+{
+  "rows": [1288, 1281, 1290],   // matching row indices, in sort order
+  "total": 5000,                // rows in the run
+  "matched": 3,                 // == rows.length (null with only=facet)
+  "facet": {                    // only with facet=<col>
+    "col": "assess/icp_fit",
+    "values": [["strong", 412], ["good", 1203]],  // top 50 by count
+    "other": 0,                 // count folded past the top 50
+    "empty": 17                 // settled cells with no value (see "empty")
+  }
+}
+```
+
+**Column refs.** `step/field` names a field column (split on the first `/`;
+step names are identifiers). A bare `step` is that step's cell-**state**
+pseudo-column, and `*` is "any step" — valid with the `state` op only.
+
+**Parameters** (all optional; none → every row in index order):
+
+- `q` — case-insensitive substring. `scope` = `all` (default: the row key
+  plus every non-`__` field of every step; each sub-key of an object-valued
+  field is searched on its own, so a `{value, source}` matches on either),
+  `keys` (the row key only) or `step/field` (that field only).
+- `filter` — a JSON array of clauses, ANDed: `{"col", "op", "v"?, "sub"?}`.
+  | op | `v` | matches when |
+  |----|-----|--------------|
+  | `in` | list | the value equals a member. `true` ≠ `1` ≠ `"1"`; `null` matches a null or absent value |
+  | `range` | `[min\|null, max\|null]` | the value is a number (or a numeric string) within the bounds; booleans are not numbers |
+  | `contains` | string | the value's text contains it, case-insensitive |
+  | `eq` | scalar | a string compares case-insensitively to the text; other scalars compare exactly |
+  | `regex` | string ≤ 200 chars | `re.search`, case-insensitive; an invalid pattern is a 400 |
+  | `empty` | — | the value is `null`, `""`, `[]`, `{}`, NaN, or the field is absent from a produced values map |
+  | `notempty` | — | settled and not empty |
+  | `state` | list of state bytes | the step's cell state (or, for `*`, any step's) is in the list |
+
+  The *text* of a non-string value is its JSON rendering, the same text the
+  cell preview shows.
+- `sub` — for an object-valued field, apply the op to `value[sub]`; a
+  sub-key the object lacks is **missing**, never a fallback onto another key.
+  Without `sub`, the object's own default sub-key is used (`d` in
+  `/api/values`: `value` when present, else the first scalar). The grid
+  always sends the column's selected sub-key once it knows one.
+- `sort` — `<col>:asc|desc`, single column. Values sort type-ranked:
+  booleans, then numbers, then strings (case-folded), then lists/objects by
+  their JSON. **Unknown and empty values sort last in both directions**, and
+  the sort is stable over ascending row index, so the row index is the
+  tiebreak. The state pseudo-column sorts by an explicit rank — pending <
+  running < retrying < skipped < cached < ok < error — so `desc` reads
+  worst-first. `sort_sub` names the sub-key for an object-valued sort column.
+- `facet=<col>` — value counts for that field over the rows matching every
+  clause **except** the ones on that column (the faceted-search convention:
+  each checkbox says what picking it would yield), plus `empty`. `rows` still
+  reflects every clause. `only=facet` skips the row list (`rows: []`,
+  `matched: null`). Buckets are JSON scalars; a list or object bucket is its
+  JSON text. A manifest enum member no row carries is simply absent — the
+  client fills zeros. `facet_sub` names the sub-key for an object-valued
+  facet column, as `sub` does for a clause: the grid sends the sub-key the
+  column shows, so each count says what ticking that box would yield.
+
+**Semantics the grid relies on.**
+
+- **Value filters see settled cells only.** A pending, running, retrying,
+  errored or skipped cell has no value: it is *unknown*, not null, and never
+  matches a value filter (so `empty` + `notempty` need not add up to
+  `total`). `state` filters cover those cells.
+- **A field or step the run never produced is missing everywhere**, never a
+  400: `empty` matches every settled row, every other value op matches
+  nothing, and a sort by it keeps row order. A filter restored from the URL
+  hash must survive a live run whose rows have not reached that field yet.
+- Malformed JSON, an unknown op, a value op on a state column, a bad regex or
+  a bad `sort`/`scope`/`facet` → **400** with the usual `detail`.
+- Results are cached per index revision, so an identical query is free until
+  the log grows. The scan runs in a worker thread: a wide run or a slow regex
+  never stalls the tail, the SSE flush or a retry.
 
 ## `GET /api/cell/{step}/{row}`
 
@@ -512,7 +604,13 @@ at most every 100ms, however fast the log grows). Each `data:` payload:
                                    // "stats", plus "rows_done" and "live");
                                    // may be {}
   "steps": [                       // ONLY steps whose counters changed; may be []
-    { "name": "web_search", "done": 4391, "errors": 38 }
+    { "name": "web_search", "done": 4391, "errors": 38,
+      "fields": ["summary", "__ctx"] }  // OPTIONAL: present only on a flush in
+                                   // which the step produced a field it had not
+                                   // before — the full list, in first-seen order,
+                                   // so the data grid adds the column without a
+                                   // snapshot refetch (accrue-ui#37). Absent means
+                                   // unchanged, not empty
   ],
   "reset": true                    // OPTIONAL, absent = false. The server
                                    // rebuilt its index (truncate-and-regrow);

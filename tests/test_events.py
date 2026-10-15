@@ -366,7 +366,14 @@ async def test_events_streams_live_deltas(tmp_path: Path):
             assert cells[(0, 0)] == OK
             assert cells[(1, 0)] == ERROR
             steps = {s["name"]: s for s in merged["steps"]}
-            assert steps["fetch"] == {"name": "fetch", "done": 2, "errors": 1}
+            # Row 0 produced `domain`, the step's first field: the list rides
+            # the delta so a live grid can add the column (accrue-ui#37).
+            assert steps["fetch"] == {
+                "name": "fetch",
+                "done": 2,
+                "errors": 1,
+                "fields": ["domain"],
+            }
             assert merged["stats"]["errors"] == 1
         finally:
             await stream.close()
