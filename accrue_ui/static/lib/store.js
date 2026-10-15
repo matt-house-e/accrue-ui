@@ -518,12 +518,10 @@ export function queryActive() {
   );
 }
 
-// The filter clauses, in the server's shape. `exceptCol` leaves one column's
-// own clause out — what a facet request wants.
-export function queryClauses(exceptCol = null) {
+// The filter clauses, in the server's shape.
+export function queryClauses() {
   const clauses = [];
   for (const [col, f] of Object.entries(columnFilters.value)) {
-    if (col === exceptCol) continue;
     clauses.push({ col, ...f });
   }
   const want = FILTER_STATE[rowFilter.value];
@@ -531,14 +529,14 @@ export function queryClauses(exceptCol = null) {
   return clauses;
 }
 
-export function queryParams({ facet = null, exceptCol = null } = {}) {
+export function queryParams({ facet = null } = {}) {
   const p = new URLSearchParams();
   const q = searchQuery.value.trim();
   if (q) {
     p.set("q", q);
     if (searchScope.value !== "all") p.set("scope", searchScope.value);
   }
-  const clauses = queryClauses(exceptCol);
+  const clauses = queryClauses();
   if (clauses.length) p.set("filter", JSON.stringify(clauses));
   const s = sortSpec.value;
   if (s) {
@@ -605,11 +603,12 @@ export async function loadRows() {
   }
 }
 
-// Value counts for one column over the rows matching every OTHER clause
-// (the server leaves the column's own clause out), for its checkbox facets.
+// Value counts for one column, for its checkbox facets. The full query goes
+// along; the server counts over the rows matching every OTHER clause, leaving
+// the column's own out (docs/api-shapes.md, `facet=`).
 export async function loadFacet(col) {
   try {
-    const res = await fetch(apiPath(`/api/rows?${queryParams({ facet: col, exceptCol: col })}`));
+    const res = await fetch(apiPath(`/api/rows?${queryParams({ facet: col })}`));
     if (!res.ok) return null;
     const data = await res.json();
     return data.facet || null;
