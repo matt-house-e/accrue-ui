@@ -180,6 +180,10 @@ class StepState:
     #: segments: ``step_end.batch_ids`` (accrue#169), else the single legacy
     #: ``batch_id``. A retry segment submits its own batch, so ids accumulate.
     batch_ids: list[str] = field(default_factory=list)
+    #: JSON kinds (see ``_value_kind``) seen per field in ok/cached values,
+    #: checked against the manifest's declared type for the Overview's
+    #: mismatch note. Sticky for the run: a healed cell's old kind stays.
+    value_kinds: dict[str, set[str]] = field(default_factory=dict)
     # --- retries (P22) ----------------------------------------------------
     #: row_attempt records with ``attempt > 1`` — attempts beyond the first for
     #: a (step, row), i.e. retries. The counter is monotonic 1-based per cell
@@ -697,7 +701,11 @@ class RunIndex:
             self._row_keys_explicit[row] = explicit_key
 
         if values:
-            for key in values:
+            settled = state in (OK, CACHED)
+            for key, val in values.items():
+                kind = _value_kind(val) if settled else None
+                if kind is not None:
+                    step.value_kinds.setdefault(key, set()).add(kind)
                 if key not in step.fields:
                     step.fields.append(key)
                     # The data grid lays out one column per field: tell live
@@ -1166,10 +1174,22 @@ class RunIndex:
         for f in manifest.get("fields") or []:
             if not isinstance(f, dict):
                 continue
+            ftype = f.get("type") or "unknown"
+            fname, fstep = f.get("name"), f.get("step")
+            producer = live_by_name.get(fstep) if isinstance(fstep, str) else None
+            seen = (
+                producer.value_kinds.get(fname)
+                if producer and isinstance(fname, str)
+                else None
+            )
             fields_out.append(
                 {
                     "name": f.get("name"),
-                    "type": f.get("type") or "unknown",
+                    "type": ftype,
+                    # Kinds the values hold that the declared type does not
+                    # allow, or null. Manifests before accrue#170 declared
+                    # a custom schema's {value, source} field as "str".
+                    "type_mismatch": _type_mismatch(ftype, seen),
                     "enum": f.get("enum") if isinstance(f.get("enum"), list) else None,
                     "description": f.get("description")
                     if isinstance(f.get("description"), str)
@@ -1903,6 +1923,43 @@ def _cache_tokens(usage: dict[str, Any]) -> tuple[int, int] | None:
         read if isinstance(read, int) else 0,
         write if isinstance(write, int) else 0,
     )
+
+
+#: Value kinds each declared manifest field type allows. A type not listed
+#: (``json``, ``unknown``, one added later) allows anything.
+_TYPE_ALLOWS: dict[str, frozenset[str]] = {
+    "str": frozenset({"str"}),
+    "int": frozenset({"number"}),
+    "float": frozenset({"number"}),
+    "number": frozenset({"number"}),
+    "bool": frozenset({"bool"}),
+    "list": frozenset({"list"}),
+    "object": frozenset({"object"}),
+    "enum": frozenset({"str", "number", "bool"}),
+}
+
+
+def _value_kind(v: Any) -> str | None:
+    """A value's JSON kind; None for null, which fits every declared type."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, (int, float)):
+        return "number"
+    if isinstance(v, str):
+        return "str"
+    if isinstance(v, list):
+        return "list"
+    return "object"
+
+
+def _type_mismatch(declared: Any, seen: set[str] | None) -> list[str] | None:
+    """The kinds in *seen* that the *declared* type does not allow, or None."""
+    allowed = _TYPE_ALLOWS.get(declared) if isinstance(declared, str) else None
+    if allowed is None or not seen:
+        return None
+    return sorted(seen - allowed) or None
 
 
 def _group_key(step: str, error: dict[str, Any] | None) -> tuple[str, str, str]:

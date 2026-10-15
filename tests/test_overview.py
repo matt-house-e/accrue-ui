@@ -543,3 +543,108 @@ def test_overview_retry_segment_batch_ids_accumulate(tmp_path: Path):
     ]
     log = _one_step_log(tmp_path, [], ends)
     assert _outcome(log)["batch_ids"] == ["msgbatch_a", "msgbatch_b", "msgbatch_c"]
+
+
+def _field(name: str, ftype: str) -> dict:
+    return {
+        "name": name,
+        "type": ftype,
+        "enum": None,
+        "description": None,
+        "step": "enrich",
+        "internal": False,
+    }
+
+
+def _fields(log: Path) -> dict[str, dict]:
+    with client_for(log) as client:
+        fields = client.get("/api/run").json()["overview"]["fields"]
+    return {f["name"]: f for f in fields}
+
+
+def test_overview_flags_a_str_field_holding_objects(tmp_path: Path):
+    """amana's case: a manifest from before accrue#170 declares a custom
+    schema's {value, source} field as "str", but the values are objects."""
+    sourced = {"value": "fintech", "source": "https://example.com"}
+    rows = [
+        row("enrich", 0, 1.0, values={"category": sourced, "hq": "DE"}),
+        row("enrich", 1, 2.0, values={"category": None, "hq": None}),
+    ]
+    log = _one_step_log(
+        tmp_path,
+        rows,
+        [{}],
+        mode="realtime",
+        fields=[_field("category", "str"), _field("hq", "str")],
+    )
+    by_name = _fields(log)
+    assert by_name["category"]["type"] == "str"
+    assert by_name["category"]["type_mismatch"] == ["object"]
+    # Matching values, and nulls, raise no note.
+    assert by_name["hq"]["type_mismatch"] is None
+
+
+def test_overview_type_mismatch_rules(tmp_path: Path):
+    rows = [
+        row(
+            "enrich",
+            0,
+            1.0,
+            values={
+                "n": 3,
+                "f": 2.5,
+                "b": True,
+                "tags": ["a"],
+                "obj": {"k": 1},
+                "pick": "strong",
+                "blob": {"any": "thing"},
+                "odd": "x",
+                "count": "12",
+            },
+        ),
+        row("enrich", 1, 2.0, values={"n": 4, "b": 1, "tags": "a, b"}),
+    ]
+    fields = [
+        _field("n", "int"),
+        _field("f", "float"),
+        _field("b", "bool"),
+        _field("tags", "list"),
+        _field("obj", "object"),
+        _field("pick", "enum"),
+        _field("blob", "json"),
+        _field("odd", "unknown"),
+        _field("count", "int"),
+    ]
+    log = _one_step_log(tmp_path, rows, [{}], mode="realtime", fields=fields)
+    mismatch = {k: f["type_mismatch"] for k, f in _fields(log).items()}
+    assert mismatch == {
+        "n": None,
+        "f": None,
+        "b": ["number"],  # a JSON 1 is not a bool
+        "tags": ["str"],
+        "obj": None,
+        "pick": None,
+        "blob": None,  # json and unknown allow anything
+        "odd": None,
+        "count": ["str"],
+    }
+
+
+def test_overview_type_mismatch_ignores_error_rows(tmp_path: Path):
+    """Only settled ok/cached values count: an errored cell's partial values
+    are not what the step produced."""
+    rows = [
+        row("enrich", 0, 1.0, values={"category": "fintech"}),
+        row(
+            "enrich",
+            1,
+            2.0,
+            status="error",
+            values={"category": {"raw": "half"}},
+            error={"type": "ParseError", "msg": "bad json"},
+        ),
+    ]
+    log = _one_step_log(
+        tmp_path, rows, [{}], mode="realtime", fields=[_field("category", "str")]
+    )
+    assert _fields(log)["category"]["type_mismatch"] is None
