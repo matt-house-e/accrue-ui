@@ -115,6 +115,13 @@ export function SearchBox() {
 
 // ---- per-column filter -----------------------------------------------------
 
+// A clause's list value when it is one. A hand-edited hash can carry any
+// shape; the server refuses it (400, shown inline), but the chip and the
+// editor must still render, or Clear all is out of reach.
+function listOf(clause, op) {
+  return clause && clause.op === op && Array.isArray(clause.v) ? clause.v : null;
+}
+
 function facetCounts(facet) {
   const counts = new Map();
   for (const [value, n] of (facet && facet.values) || []) counts.set(JSON.stringify(value), n);
@@ -127,8 +134,8 @@ function FilterEditor({ col, step, field, spec, close }) {
   const presenceNow =
     current && (current.op === "empty" || current.op === "notempty") ? current.op : "any";
   const [presence, setPresence] = useState(presenceNow);
-  const [picked, setPicked] = useState(current && current.op === "in" ? current.v : []);
-  const range = current && current.op === "range" ? current.v : [null, null];
+  const [picked, setPicked] = useState(listOf(current, "in") || []);
+  const range = listOf(current, "range") || [null, null];
   const [lo, setLo] = useState(range[0] == null ? "" : String(range[0]));
   const [hi, setHi] = useState(range[1] == null ? "" : String(range[1]));
   const [strOp, setStrOp] = useState(
@@ -274,7 +281,7 @@ export function ColumnFilterButton({ col, step, field }) {
 
 function StateEditor({ step, close }) {
   const current = columnFilters.value[step];
-  const [picked, setPicked] = useState(current && current.op === "state" ? current.v : []);
+  const [picked, setPicked] = useState(listOf(current, "state") || []);
   const sort = sortSpec.value;
   const toggle = (s) =>
     setPicked(picked.includes(s) ? picked.filter((p) => p !== s) : [...picked, s]);
@@ -342,16 +349,20 @@ function fieldOf(col) {
 
 function clauseLabel(col, f) {
   const name = col === "*" ? "any step" : fieldOf(col);
+  if (!f || typeof f !== "object") return `${name}: invalid filter`;
   const quote = (v) => (typeof v === "string" ? `“${v}”` : v === null ? "null" : String(v));
+  const list = Array.isArray(f.v) ? f.v : null;
   switch (f.op) {
     case "empty":
       return `${name} is empty`;
     case "notempty":
       return `${name} is not empty`;
     case "in":
-      return `${name} ${f.v.length === 1 ? "=" : "in"} ${f.v.map(quote).join(", ")}`;
+      if (list) return `${name} ${list.length === 1 ? "=" : "in"} ${list.map(quote).join(", ")}`;
+      break;
     case "range": {
-      const [a, b] = f.v;
+      if (!list) break;
+      const [a, b] = list;
       if (a != null && b != null) return `${name} ${a}–${b}`;
       return a != null ? `${name} ≥ ${a}` : `${name} ≤ ${b}`;
     }
@@ -362,10 +373,10 @@ function clauseLabel(col, f) {
     case "regex":
       return `${name} ~ /${f.v}/`;
     case "state":
-      return `${name} state: ${f.v.map((s) => STATE_NAMES[s]).join(", ")}`;
-    default:
-      return `${name} ${f.op}`;
+      if (list) return `${name} state: ${list.map((s) => STATE_NAMES[s]).join(", ")}`;
+      break;
   }
+  return `${name} ${f.op}`;
 }
 
 function Chip({ label, onRemove }) {
