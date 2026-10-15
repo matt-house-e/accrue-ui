@@ -40,7 +40,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .events import FLUSH_INTERVAL_S, DeltaBroadcaster
-from .index import RunLog
+from .index import RunLog, open_log, scan_runs
 from .pricing import PRICES, load_prices
 from .retry import RetryController
 from .routes import router
@@ -51,11 +51,25 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 async def _follow(app: FastAPI) -> None:
-    """Feed appended records into the run log; rebuild it on truncation."""
+    """Feed appended records into the run log; rebuild it on truncation.
+
+    ``POST /api/runs/select`` swaps in another log — ``tail``, ``runs`` and
+    ``run_path`` together, already backfilled. The follower notices between
+    reads, and is the only one to close the tail it was following: a read
+    of it may have been in flight in the worker thread when the swap landed.
+    """
     tail: Tail = app.state.tail
     generation = tail.generation
     while True:
+        if app.state.tail is not tail:
+            tail.close()
+            tail = app.state.tail
+            generation = tail.generation
         records = await asyncio.to_thread(tail.read_available)
+        if app.state.tail is not tail:
+            # Read from the log just switched away from: none of it belongs
+            # to the run log now being served.
+            continue
         if tail.generation != generation:
             # The log was truncated or replaced: offsets and derived state
             # are stale, so start a fresh run log. read_available() already
@@ -67,7 +81,10 @@ async def _follow(app: FastAPI) -> None:
             # them and must refetch the whole snapshot.
             generation = tail.generation
             app.state.runs = RunLog(
-                app.state.run_path, retry=app.state.retry, prices=app.state.prices
+                tail.path,
+                retry=app.state.retry,
+                prices=app.state.prices,
+                name=app.state.runs.name,
             )
             app.state.runs.mark_reset()
         for record in records:
@@ -106,6 +123,17 @@ async def _flush_deltas(app: FastAPI) -> None:
                 app.state.broadcaster.publish(delta)
 
 
+def _log_name(app: FastAPI, path: Path) -> str:
+    """*path*'s label in the run list: its folder under ``--runs-dir``."""
+    if not app.state.runs_recursive:
+        return path.stem
+    listed = scan_runs(app.state.runs_dir, recursive=True, always=(path,))
+    target = path.resolve()
+    return next(
+        (r["name"] for r in listed if Path(r["path"]).resolve() == target), path.stem
+    )
+
+
 def _reset_delta() -> dict:
     """An otherwise empty delta telling a client to refetch its snapshot."""
     return {"t": 0.0, "cells": [], "stats": {}, "steps": [], "reset": True}
@@ -131,18 +159,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        tail = Tail(run_path)
         # Import --pipeline/--data now so the first snapshot already knows
         # whether retry is on the table, and why not when it isn't.
         retry.resolve()
-        runs = RunLog(run_path, retry=retry, prices=table)
-        for record in tail.read_available():
-            runs.apply(record)
-        # The initial backfill is the snapshot, not a delta: drain it away so
-        # the first SSE flush only carries changes made after startup.
-        for index in runs.runs:
-            index.drain_delta()
-        runs.take_runs_changed()
+        tail, runs = open_log(
+            run_path, retry=retry, prices=table, name=_log_name(app, run_path)
+        )
         app.state.run_path = run_path
         app.state.tail = tail
         app.state.runs = runs
@@ -162,7 +184,10 @@ def create_app(
                 task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.gather(*tasks, return_exceptions=True)
+            # The launch tail, and the one being served if a switch replaced
+            # it (the follower closes the tails in between).
             tail.close()
+            app.state.tail.close()
 
     app = FastAPI(title="accrue-ui", lifespan=lifespan, openapi_url=None)
     # Set before startup so a caller can inspect the retry specs (and the
@@ -173,6 +198,8 @@ def create_app(
     # siblings. Fixed at launch, so switching logs never moves the list.
     app.state.runs_dir = Path(runs_dir) if runs_dir is not None else run_path.parent
     app.state.runs_recursive = runs_dir is not None
+    # Serializes POST /api/runs/select.
+    app.state.select_lock = asyncio.Lock()
     install_security(app, token=token, port=port, allow_origin=allow_origin)
     app.include_router(router)
     # Static frontend mounts last so /api/* is matched first.
