@@ -492,6 +492,8 @@ def test_unrecorded_cache_tokens_say_so_instead_of_zero():
     assert "fmtInt(cost.tokens.cache_read)" not in cost
     inspector = (STATIC / "views" / "inspector.js").read_text()
     assert "d.usage.cache_read != null" in inspector
+    # Not "Cache": that row is accrue's result cache (from_cache).
+    assert '"Prompt cache"' in inspector
     css = (STATIC / "style.css").read_text()
     assert ".token-row .v.dim" in css
 
