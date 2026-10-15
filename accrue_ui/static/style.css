@@ -471,7 +471,7 @@ mark {
 .filter-actions { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
 .grid-empty {
   padding: 24px 0;
-  font: 400 12px/1 var(--font-mono);
+  font: 400 12px/1 var(--font-sans);
   color: var(--faint-2);
 }
 .dim { color: var(--faint-2); }
