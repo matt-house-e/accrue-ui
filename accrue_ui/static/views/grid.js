@@ -211,13 +211,15 @@ function FieldHead({ col, width }) {
   </div>`;
 }
 
-// Status mode keeps one column per step.
+// Status mode keeps one column per step; its state menu filters and sorts
+// the shared row list just like the data-mode band's does.
 function StatusHead({ step }) {
   return html`<div class="col-head" key=${step.name}>
     <div class="step-name">
       ${step.name}
       <span class="level-chip">L${step.level}</span>
       ${step.mode === "batch" && html`<span class="batch-chip">batch</span>`}
+      <${StateMenuButton} step=${step.name} />
     </div>
     <div class="done-count">${fmtInt(step.done)} / ${fmtInt(step.total)}</div>
   </div>`;
