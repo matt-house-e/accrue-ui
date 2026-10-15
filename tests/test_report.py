@@ -260,6 +260,38 @@ def test_report_lists_the_unpriced_model_of_a_partly_priced_run(tmp_path: Path):
     )
 
 
+def test_report_says_cache_tokens_were_not_recorded(tmp_path: Path):
+    """A log from before accrue's cache-token fields: "not recorded", not 0."""
+    with client_for(_log(tmp_path)) as client:
+        html_doc = client.get("/api/report").text
+    for key in ("Cache read", "Cache write"):
+        assert (
+            f"<div class='k'>{key}</div><div class='v unpriced'>not recorded</div>"
+            in html_doc
+        )
+    assert "written before accrue 1.5.1 added cache-token fields" in html_doc
+
+
+def test_report_shows_recorded_cache_tokens(tmp_path: Path):
+    usage = {
+        "in": 500,
+        "out": 50,
+        "cache_read_tokens": 12_000,
+        "cache_write_tokens": 0,
+        "cost": None,
+    }
+    records = _report_records()
+    records.insert(-1, row("score", 0, 1.5, usage=usage))
+    path = tmp_path / "cached.jsonl"
+    write_log(path, records)
+    age_file(path)
+    with client_for(path) as client:
+        html_doc = client.get("/api/report").text
+    assert "<div class='k'>Cache read</div><div class='v'>12,000</div>" in html_doc
+    assert "<div class='k'>Cache write</div><div class='v'>0</div>" in html_doc
+    assert "not recorded" not in html_doc
+
+
 def test_report_says_no_priced_models_only_when_no_model_spent(tmp_path: Path):
     """Function steps (model null) price to nothing and name nothing."""
     records = _report_records()

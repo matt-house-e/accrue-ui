@@ -2,7 +2,14 @@
 // table, stat tiles, and token counts.
 import { html } from "../lib/html.js";
 import { IconInfo } from "../lib/icons.js";
-import { fmtInt, fmtMoney, fmtUnpriced, unpricedTip } from "../lib/fmt.js";
+import {
+  CACHE_NOT_RECORDED,
+  CACHE_NOT_RECORDED_TIP,
+  fmtInt,
+  fmtMoney,
+  fmtUnpriced,
+  unpricedTip,
+} from "../lib/fmt.js";
 import { snapshot } from "../lib/store.js";
 
 // Single-hue CSS bars (--jade-9 fill, 14px, rounded right end only), widths
@@ -71,6 +78,19 @@ function Tile({ label, value, tone = "", tip = null, info = false }) {
   return html`<div class="cost-tile">
     <div class="k">${head}</div>
     <div class=${`v ${value == null ? "dim" : tone}`}>${value ?? DASH}</div>
+  </div>`;
+}
+
+// One Tokens-card row. A null count is a cache figure the log never
+// recorded: say so, with the why on hover, rather than print a 0.
+function TokenRow({ label, value }) {
+  return html`<div class="token-row">
+    <span class="k">${label}</span>
+    ${value == null
+      ? html`<span class="v dim tip" data-tip=${CACHE_NOT_RECORDED_TIP}>
+          <span class="tip-label">${CACHE_NOT_RECORDED}</span>
+        </span>`
+      : html`<span class="v">${fmtInt(value)}</span>`}
   </div>`;
 }
 
@@ -167,22 +187,10 @@ export function Cost() {
       html`<div class="cost-card">
         <h3>Tokens</h3>
         <div class="token-rows">
-          <div class="token-row">
-            <span class="k">Input</span>
-            <span class="v">${fmtInt(cost.tokens.input)}</span>
-          </div>
-          <div class="token-row">
-            <span class="k">Output</span>
-            <span class="v">${fmtInt(cost.tokens.output)}</span>
-          </div>
-          <div class="token-row">
-            <span class="k">Cache read</span>
-            <span class="v">${fmtInt(cost.tokens.cache_read)}</span>
-          </div>
-          <div class="token-row">
-            <span class="k">Cache write</span>
-            <span class="v">${fmtInt(cost.tokens.cache_write)}</span>
-          </div>
+          <${TokenRow} label="Input" value=${cost.tokens.input} />
+          <${TokenRow} label="Output" value=${cost.tokens.output} />
+          <${TokenRow} label="Cache read" value=${cost.tokens.cache_read} />
+          <${TokenRow} label="Cache write" value=${cost.tokens.cache_write} />
         </div>
       </div>`}
     </div>

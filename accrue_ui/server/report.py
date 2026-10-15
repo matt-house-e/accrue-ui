@@ -27,6 +27,14 @@ if TYPE_CHECKING:
 DASH = "—"  # em-dash: an honestly-unknown number, never a fabricated 0
 #: PRICES_HINT in static/lib/fmt.js: how to price a model the table lacks.
 PRICES_HINT = "supply one with --prices <file.toml>"
+#: CACHE_NOT_RECORDED(_TIP) in static/lib/fmt.js: a log from before accrue's
+#: cache-token fields has unknown cache counts, not zero ones.
+CACHE_NOT_RECORDED = "not recorded"
+CACHE_NOT_RECORDED_TIP = (
+    "This run log was written before accrue 1.5.1 added cache-token fields,"
+    " so cache reads and writes are unknown and every dollar figure leaves"
+    " them out."
+)
 STATE_LABELS = ("pending", "running", "ok", "cached", "retrying", "error", "skipped")
 #: One swatch color per cell-state byte, from the token table (bg tints).
 STATE_COLORS = (
@@ -299,10 +307,13 @@ def _cost_section(snap: dict[str, Any]) -> str:
         "<div class='tiles' style='margin-top:16px'>"
         + _tile("Input tokens", _int(tokens["input"]))
         + _tile("Output tokens", _int(tokens["output"]))
-        + _tile("Cache read", _int(tokens["cache_read"]))
-        + _tile("Cache write", _int(tokens["cache_write"]))
+        + _cache_tile("Cache read", tokens["cache_read"])
+        + _cache_tile("Cache write", tokens["cache_write"])
         + "</div>"
     )
+    if tokens["cache_read"] is None or tokens["cache_write"] is None:
+        # The Cost tab says this on hover; a static export has no hover.
+        out.append(f"<p class='caveat'>{_esc(CACHE_NOT_RECORDED_TIP)}</p>")
     plan = cost.get("plan")
     if isinstance(plan, dict) and plan.get("est_total") is not None:
         out.append(
@@ -358,6 +369,12 @@ def _esc(value: Any) -> str:
 
 def _int(value: Any) -> str:
     return f"{int(value):,}" if isinstance(value, (int, float)) else DASH
+
+
+def _cache_tile(key: str, value: Any) -> str:
+    if value is None:
+        return _tile(key, CACHE_NOT_RECORDED, tone="unpriced")
+    return _tile(key, _int(value))
 
 
 def _money(value: Any) -> str:

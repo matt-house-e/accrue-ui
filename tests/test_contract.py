@@ -84,11 +84,13 @@ def test_stats_and_cost_with_no_pricing(golden_log: Path):
     assert cost["by_step"] == {}
     assert cost["by_model"] == {}
     assert cost["plan"] is None
+    # The pinned fixture predates accrue#169's cache-token fields: unknown,
+    # not zero.
     assert cost["tokens"] == {
         "input": 0,
         "output": 0,
-        "cache_read": 0,
-        "cache_write": 0,
+        "cache_read": None,
+        "cache_write": None,
     }
     assert cost["wasted"] is None
     assert cost["batch_saved"] is None

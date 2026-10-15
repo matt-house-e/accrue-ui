@@ -8,7 +8,7 @@
     "type": "RateLimitError",
     "msg": "Rate limit reached for gpt-5.2-mini on tokens per minute (TPM): Limit 2,000,000, Used 1,998,432, Requested 5,214. Please try again in 6ms."
   },
-  "usage": { "in": 1204, "out": 0, "cost": 0.0031 },
+  "usage": { "in": 1204, "out": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0031 },
   "elapsed_ms": 26100,
   "queued_at": "2026-08-17T09:41:00Z",
   "attempts": [

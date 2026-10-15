@@ -66,6 +66,16 @@ function kvRows(d) {
   }
   if (d.usage) {
     rows.push(["Tokens", `${fmtInt(d.usage.in)} in · ${fmtInt(d.usage.out)} out`]);
+    // Both null together on a log that predates cache-token fields (the
+    // server reads them as a pair); the Cost tab explains. "Prompt cache",
+    // not "Cache": the "Cache" row below is accrue's result cache, and a
+    // miss there routinely reads tokens from the provider's prompt cache.
+    if (d.usage.cache_read != null) {
+      rows.push([
+        "Prompt cache",
+        `${fmtInt(d.usage.cache_read)} read · ${fmtInt(d.usage.cache_write)} write`,
+      ]);
+    }
     if (d.usage.cost != null) rows.push(["Cost", fmtMoney(d.usage.cost)]);
   }
   if (typeof d.from_cache === "boolean") {

@@ -145,8 +145,8 @@ Full snapshot of the run, including the complete cell-state array.
     "tokens": {
       "input": 4102384,
       "output": 903117,
-      "cache_read": 2914220,
-      "cache_write": 388051
+      "cache_read": 2914220,       // int | null: null when the log predates
+      "cache_write": 388051        // accrue's cache-token fields (see below)
     },
     "wasted": 0.13,                // number | null: USD spent on cells that
                                    // ultimately failed
@@ -213,6 +213,16 @@ for acme-9") with the `--prices <file.toml>` hint instead. `stats.unpriced`
 lives in `stats` rather than `cost` so it rides the SSE delta like `spend`.
 A function step (`model: null`) or a step that spent no tokens is never in
 it; a step whose log carries `usage.cost` counts as priced.
+
+`cost.tokens.cache_read` / `cache_write` come from the log's
+`usage.cache_read_tokens` / `cache_write_tokens` (accrue 1.5.1, accrue#169).
+These are disjoint from `in`, so billed input is `input + cache_read +
+cache_write`, and every dollar figure prices them at the model's cache rates.
+The emitter always writes both keys. When no usage object in the run
+carries them, the log predates them and both counts are `null`, meaning
+unknown: clients say "not recorded", never `0`, and the dollar figures leave
+cache out. A recorded `0` (an adapter that reports none, or a run with no
+cache hits) stays `0`.
 
 Invariants the server must keep:
 
@@ -408,7 +418,9 @@ One cell's full detail for the inspector.
   "status": "error",               // "pending"|"running"|"ok"|"cached"|"retrying"|"error"|"skipped"
   "from_cache": false,
   "error": { "type": "RateLimitError", "msg": "Rate limit reached ..." },  // null unless failed
-  "usage": { "in": 1204, "out": 0, "cost": 0.0031 },  // null when nothing was billed
+  "usage": { "in": 1204, "out": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0031 },
+                                   // null when nothing was billed; cache_* are
+                                   // int | null, null as for cost.tokens
   "elapsed_ms": 26100,             // queued -> terminal; null when not finished
   "queued_at": "2026-08-17T09:41:00Z",  // null when never queued
   "attempts": [                    // null when no attempt ran — pending,

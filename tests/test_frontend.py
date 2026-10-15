@@ -267,7 +267,7 @@ def test_cell_fixture_shape():
     assert doc["row"] == 1284
     assert doc["status"] == "error"
     assert set(doc["error"]) == {"type", "msg"}
-    assert set(doc["usage"]) == {"in", "out", "cost"}
+    assert set(doc["usage"]) == {"in", "out", "cache_read", "cache_write", "cost"}
     assert len(doc["attempts"]) == 3
     for attempt in doc["attempts"]:
         assert set(attempt) == {"n", "kind", "at", "latency_ms", "status", "backoff_s"}
@@ -477,6 +477,25 @@ def test_unpriced_models_are_named_instead_of_dashed():
     css = (STATIC / "style.css").read_text()
     assert ".cost-tile .v.unpriced" in css
     assert ".stat-value .unpriced" in css
+
+
+def test_unrecorded_cache_tokens_say_so_instead_of_zero():
+    """cost.tokens.cache_* is null on a log from before the cache fields."""
+    fmt = (STATIC / "lib" / "fmt.js").read_text()
+    assert 'CACHE_NOT_RECORDED = "not recorded"' in fmt
+    cost = (STATIC / "views" / "cost.js").read_text()
+    assert "value == null" in cost.split("function TokenRow", 1)[1]
+    assert "data-tip=${CACHE_NOT_RECORDED_TIP}" in cost
+    assert 'label="Cache read" value=${cost.tokens.cache_read}' in cost
+    assert 'label="Cache write" value=${cost.tokens.cache_write}' in cost
+    # fmtInt(null) is "" — the old rows would have rendered a blank.
+    assert "fmtInt(cost.tokens.cache_read)" not in cost
+    inspector = (STATIC / "views" / "inspector.js").read_text()
+    assert "d.usage.cache_read != null" in inspector
+    # Not "Cache": that row is accrue's result cache (from_cache).
+    assert '"Prompt cache"' in inspector
+    css = (STATIC / "style.css").read_text()
+    assert ".token-row .v.dim" in css
 
 
 def test_run_chip_does_not_repeat_the_id():
