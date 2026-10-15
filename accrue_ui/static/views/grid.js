@@ -18,7 +18,6 @@ import {
   loadValuesFor,
   queryActive,
   rowsError,
-  rowsLoading,
   searchQuery,
   searchScope,
   select,
@@ -255,7 +254,7 @@ function Val({ v, isNull, hl }) {
     : html`<span class="val">${hl ? highlight(v || "", hl) : v || ""}</span>`;
 }
 
-function DataCell({ step, stepName, field, row, state, vrow, hl }) {
+function DataCell({ stepName, field, row, state, vrow, hl }) {
   const sel = selection.value;
   const isSel = sel && sel.step === stepName && sel.row === row;
   const cell = vrow && vrow.cells ? vrow.cells[stepName] : null;
@@ -437,7 +436,6 @@ export function Grid() {
         }
         return html`<${DataCell}
           key=${col.id}
-          step=${col.step}
           stepName=${col.step.name}
           field=${col.field}
           row=${r}
@@ -481,9 +479,7 @@ export function Grid() {
       ${active && !sr
         ? rowsError.value
           ? html`<span class="filter-error">${rowsError.value}</span>`
-          : rowsLoading.value
-            ? "Querying…"
-            : "Querying…"
+          : "Querying…"
         : "No rows match."}
     </div>`;
 
