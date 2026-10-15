@@ -98,6 +98,31 @@ function typeClass(f) {
   return "str";
 }
 
+// The values hold kinds the declared type does not allow (server:
+// type_mismatch). Manifests before accrue 1.5.1 (#170) declared a custom
+// schema's nested {value, source} field as "str", so say where the gap is.
+function MismatchChip({ f }) {
+  const kinds = f.type_mismatch;
+  if (!kinds || kinds.length === 0) return null;
+  const tip =
+    `Declared ${f.type}, but values are ${kinds.join(" / ")}. ` +
+    "Manifests written before accrue 1.5.1 could declare a custom schema's " +
+    "nested field as str; the values are what the step produced.";
+  return html`<span class="ov-mismatch" data-tip=${tip}
+    ><span class="tip-label">≠ ${kinds.join(" / ")}</span></span
+  >`;
+}
+
+// Every provider batch the step submitted (step_end.batch_ids): a batch split
+// by count or bytes has several. Omitted for realtime steps.
+function BatchIds({ ids }) {
+  if (!ids || ids.length === 0) return null;
+  return html`<div class="ov-batch-ids">
+    <span class="ov-batch-k">${ids.length === 1 ? "Batch" : "Batches"}</span>
+    ${ids.map((id) => html`<span key=${id} class="ov-batch-id mono">${id}</span>`)}
+  </div>`;
+}
+
 // Rail-node state for one step from its live outcome. `done` counts every
 // settled cell (ok/cached/error/skipped); a step still filling in pulses only
 // while the run itself is live, so a cold interrupted run doesn't fake motion.
@@ -283,6 +308,7 @@ function StepCard({ step, live, internalSet }) {
         >`
       )}
     </div>
+    <${BatchIds} ids=${o.batch_ids} />
     <${SystemPrompt} prompt=${step.system_prompt} name=${step.name} />
   </div>`;
 }
@@ -349,10 +375,11 @@ function Fields({ fields }) {
                   ? html`<span class="tip-label">${f.name}</span>`
                   : f.name}
               </div>
-              <div>
+              <div class="ov-ftype">
                 <span class=${`ov-type ${typeClass(f)}`}
                   >${f.internal ? "internal" : f.type}</span
                 >
+                <${MismatchChip} f=${f} />
               </div>
               <div class="ov-from">${f.step ?? ""}</div>
             </div>`;

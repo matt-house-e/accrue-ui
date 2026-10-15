@@ -1494,6 +1494,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   border-radius: 3px;
   padding: 1px 6px;
 }
+.ov-batch-ids { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.ov-batch-k { font: 400 11px/1 var(--font-sans); color: var(--faint-2); }
+.ov-batch-id { font: 400 11px/1.3 var(--font-mono); color: var(--muted); }
 .ov-produces.internal {
   color: var(--faint-1);
   background: transparent;
@@ -1579,6 +1582,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 .ov-type.num { color: var(--jade-11); background: var(--ok-bg); }
 .ov-type.str { color: var(--muted); background: var(--component); border: 1px solid var(--border-1); }
 .ov-type.internal { color: var(--faint-1); background: transparent; border: 1px dashed var(--border-2); }
+.ov-ftype { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+.ov-mismatch {
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--retry-text);
+  background: var(--retry-bg);
+}
 
 .ov-foot { margin-top: 16px; padding-top: 12px; font: 400 11px/1.5 var(--font-mono); color: var(--faint-2); }
 
