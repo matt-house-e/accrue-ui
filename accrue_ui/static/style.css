@@ -111,6 +111,7 @@ button:disabled { cursor: not-allowed; }
   color: var(--ink);
   font: 400 11.5px/1.5 var(--font-sans);
   white-space: pre-line;
+  overflow-wrap: anywhere; /* a nested value's source URL has no spaces */
   text-align: left;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
   opacity: 0;
@@ -470,6 +471,7 @@ button:disabled { cursor: not-allowed; }
   padding: 3px 6px;
 }
 .field-chip:hover { background: var(--hover); }
+.subkey-chip { margin-left: 4px; }
 
 .grid-canvas { position: relative; min-width: min-content; }
 .grid-row {
@@ -539,6 +541,10 @@ button:disabled { cursor: not-allowed; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* present-but-null, so it never reads as an empty string */
+.dcell .val.null { color: var(--faint-1); }
+/* object-valued field: the cell shows one sub-key, hover shows them all */
+.dcell.has-tip .val { border-bottom: 1px dotted var(--faint-2); }
 .dcell.s0 { color: var(--faint-1); border-color: var(--border-1); background: var(--ground); }
 .dcell.s1 { color: var(--jade-11); }
 .dcell.s3 .prefix { color: var(--cached-text); flex: none; display: flex; }
@@ -767,6 +773,8 @@ button:disabled { cursor: not-allowed; }
 }
 .values-table td.field { color: var(--faint-2); white-space: nowrap; width: 1%; padding-right: 16px; }
 .values-table td.value { color: var(--muted); overflow-wrap: anywhere; }
+.values-table td.value.json { white-space: pre-wrap; }
+.values-table .null { color: var(--faint-1); }
 .raw-json {
   background: var(--ground);
   border: 1px solid var(--border-1);

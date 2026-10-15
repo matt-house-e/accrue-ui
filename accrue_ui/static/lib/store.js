@@ -34,6 +34,10 @@ export const rowFilter = signal("all"); // 'all' | 'errors' | 'retrying' | 'skip
 export const searchQuery = signal("");
 export const showInternalFields = signal(false);
 export const fieldChoice = signal({}); // stepName -> selected field name
+// stepName -> the sub-key its data column shows for object-valued fields.
+// Per column, not per field: one choice covers every {value, source} field
+// the field-chip cycles through (accrue-ui#36).
+export const subKeyChoice = signal({});
 export const sseStatus = signal("idle"); // 'idle' | 'connected'
 export const cellDetail = signal(null); // /api/cell payload for selection
 export const cellDetailLoading = signal(false);
@@ -51,6 +55,30 @@ export const selectedRun = signal(null);
 export const valuesCache = new Map();
 export const valuesVersion = signal(0);
 const VALUES_CAP = 2000;
+
+// stepName -> field -> {keys, d}: the sub-keys seen under an object-valued
+// field across loaded rows (first-seen order, capped) and the first default
+// the server named. Grown as values load rather than scanned from the cache
+// on every render — a live run re-renders the column heads ~10x/second.
+const subKeysSeen = new Map();
+const SUBKEYS_CAP = 32;
+
+function noteSubKeys(row) {
+  for (const [stepName, cell] of Object.entries(row.cells || {})) {
+    if (!cell || !cell.f) continue;
+    for (const [field, entry] of Object.entries(cell.f)) {
+      if (!entry || typeof entry !== "object") continue;
+      let byField = subKeysSeen.get(stepName);
+      if (!byField) subKeysSeen.set(stepName, (byField = new Map()));
+      let seen = byField.get(field);
+      if (!seen) byField.set(field, (seen = { keys: [], d: entry.d }));
+      for (const k of Object.keys(entry.o)) {
+        if (seen.keys.length >= SUBKEYS_CAP) break;
+        if (!seen.keys.includes(k)) seen.keys.push(k);
+      }
+    }
+  }
+}
 
 // ---- derived helpers ----------------------------------------------------
 
@@ -85,6 +113,30 @@ export function selectedField(step) {
   const fields = stepFields(step);
   const choice = fieldChoice.value[step.name];
   return choice && fields.includes(choice) ? choice : fields[0] || null;
+}
+
+// The sub-keys seen under a step's object-valued field, or null when no
+// loaded row holds an object there (the column then has no sub-key chip).
+export function subKeysFor(stepName, field) {
+  valuesVersion.value; // subscribe: the registry grows as values load
+  const byField = subKeysSeen.get(stepName);
+  return (byField && byField.get(field)) || null;
+}
+
+// The sub-key a column's chip names for *field*: the column's choice while
+// this field has it, else the field's default.
+export function selectedSubKey(stepName, field) {
+  const seen = subKeysFor(stepName, field);
+  if (!seen) return null;
+  const choice = subKeyChoice.value[stepName];
+  return choice && seen.keys.includes(choice) ? choice : seen.d;
+}
+
+// The sub-key one cell shows for its {o, d} entry: the column's choice when
+// this object has it — rows need not share keys — else its own default.
+export function subKeyOf(stepName, entry) {
+  const choice = subKeyChoice.value[stepName];
+  return choice && choice in entry.o ? choice : entry.d;
 }
 
 // Is a retry in flight? True from the moment we POST until the server stops
@@ -162,6 +214,7 @@ export async function loadRun() {
 // or a new latest one) is replacing it, and its rows share indices with it.
 function forgetRun() {
   valuesCache.clear();
+  subKeysSeen.clear();
   valuesVersion.value++;
   selection.value = null;
   cellDetail.value = null;
@@ -181,6 +234,7 @@ export async function loadValues(start, count) {
     for (const row of data.rows || []) {
       valuesCache.delete(row.row); // refresh position for LRU-ish eviction
       valuesCache.set(row.row, row);
+      noteSubKeys(row);
     }
     while (valuesCache.size > VALUES_CAP) {
       valuesCache.delete(valuesCache.keys().next().value);
@@ -304,6 +358,14 @@ export function cycleField(step) {
   const current = selectedField(step);
   const next = fields[(fields.indexOf(current) + 1) % fields.length];
   fieldChoice.value = { ...fieldChoice.value, [step.name]: next };
+}
+
+export function cycleSubKey(step, field) {
+  const seen = subKeysFor(step.name, field);
+  if (!seen || seen.keys.length < 2) return;
+  const current = selectedSubKey(step.name, field);
+  const next = seen.keys[(seen.keys.indexOf(current) + 1) % seen.keys.length];
+  subKeyChoice.value = { ...subKeyChoice.value, [step.name]: next };
 }
 
 // Deltas carry cell states and counters — never error_groups. During a live
