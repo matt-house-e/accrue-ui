@@ -40,7 +40,7 @@ from typing import Any
 
 from .pricing import PRICES, ModelPrice, price_usd
 from .retry import RetryController
-from .tail import TailRecord
+from .tail import Tail, TailRecord
 
 PENDING, RUNNING, OK, CACHED, RETRYING, ERROR, SKIPPED = range(7)
 STATE_NAMES = ("pending", "running", "ok", "cached", "retrying", "error", "skipped")
@@ -77,6 +77,7 @@ MAX_PROMPT_BODY_BYTES = 16 * 1024 * 1024
 SCHEMA_V = 1
 #: ``retry.reason`` for a run that is not the latest in its file.
 RETRY_NOT_LATEST = "retry re-runs the latest run in this file; switch to it to retry"
+
 #: ``retry.reason`` for a run whose manifest says checkpointing was off:
 #: ``retry_failed()`` resumes from the checkpoint, and there is none.
 RETRY_NO_CHECKPOINT = (
@@ -269,8 +270,12 @@ class RunIndex:
         retry: RetryController | None = None,
         prices: Mapping[str, ModelPrice] | None = None,
         fallback_id: str | None = None,
+        name: str | None = None,
     ):
         self.path = Path(path)
+        #: The log's label (``run.name``): its folder under ``--runs-dir``
+        #: (see :func:`scan_runs`), else the file's stem.
+        self.name = name or self.path.stem
         #: What this run is called when its log never names it (no
         #: ``pipeline_start``, or one without a ``run_id``). The file's stem
         #: for a one-run file; :class:`RunLog` numbers later runs.
@@ -957,7 +962,7 @@ class RunIndex:
     def run_meta(self) -> dict[str, Any]:
         return {
             "id": self.id,
-            "name": self.path.stem,
+            "name": self.name,
             "started_at": _iso_utc(self.started_at) if self.started_at else None,
             "live": self.is_live(),
             "elapsed_s": self._elapsed_s(),
@@ -1059,12 +1064,18 @@ class RunIndex:
     def retry_block(self) -> dict[str, Any]:
         """``/api/run``'s retry block — availability comes from the controller.
 
+        A run in any log but the launch log reports retry unavailable: the
+        server switched to it (``POST /api/runs/select``), but ``--pipeline``
+        and ``--data`` belong to the launch log, and the retry appends there.
+
         A superseded run (a later one shares its file) reports retry
         unavailable whatever the controller says: see :attr:`superseded`. So
         does a run the manifest says had checkpointing off — accrue's
         ``retry_failed()`` raises without a checkpoint to resume from.
         """
         block = self.retry.block()
+        if self.path.resolve() != self.retry.run_path.resolve():
+            return {**block, "available": False, "reason": retry_other_log(self.retry)}
         if self.superseded:
             return {**block, "available": False, "reason": RETRY_NOT_LATEST}
         if self._checkpointing_off():
@@ -1762,8 +1773,11 @@ class RunLog:
         path: str | Path,
         retry: RetryController | None = None,
         prices: Mapping[str, ModelPrice] | None = None,
+        name: str | None = None,
     ):
         self.path = Path(path)
+        #: The log's label; see :attr:`RunIndex.name`.
+        self.name = name or self.path.stem
         self._retry = retry if retry is not None else RetryController(path)
         self._prices = prices
         self.runs: list[RunIndex] = []
@@ -1780,6 +1794,7 @@ class RunLog:
             retry=self._retry,
             prices=self._prices,
             fallback_id=self.path.stem if n == 0 else f"{self.path.stem}-{n + 1}",
+            name=self.name,
         )
         for earlier in self.runs:
             earlier.superseded = True
@@ -1841,8 +1856,17 @@ class RunLog:
         return changed
 
     def snapshot(self, index: RunIndex) -> dict[str, Any]:
-        """*index*'s ``/api/run`` snapshot plus the file's run list."""
-        return {**index.snapshot(), "file_runs": self.runs_block()}
+        """*index*'s ``/api/run`` snapshot plus the file's run list.
+
+        ``log`` names the file being served. A client compares its ``path``
+        to drop what it cached for another log: two logs under one
+        ``--runs-dir`` can hold runs with the same id (accrue-ui#38).
+        """
+        return {
+            **index.snapshot(),
+            "log": {"path": str(self.path), "name": self.name},
+            "file_runs": self.runs_block(),
+        }
 
     def runs_block(self) -> list[dict[str, Any]]:
         """The runs this file holds, newest first (``/api/run``'s ``file_runs``)."""
@@ -1860,6 +1884,37 @@ class RunLog:
 
 
 # ------------------------------------------------------------------- helpers
+
+
+def retry_other_log(retry: RetryController) -> str:
+    """``retry.reason`` while the server shows a log it was not launched on."""
+    return (
+        f"retry re-runs {retry.run_path}, the log this server was launched "
+        "with; switch back to it to retry"
+    )
+
+
+def open_log(
+    path: str | Path,
+    *,
+    retry: RetryController,
+    prices: Mapping[str, ModelPrice],
+    name: str | None = None,
+) -> tuple[Tail, RunLog]:
+    """A follower for *path* and the run log built from everything in it.
+
+    The backfill is the snapshot, not a delta: it is drained away, so the
+    first SSE flush only carries changes made after the log was opened.
+    Blocking (it reads the whole file) — off the event loop once serving.
+    """
+    tail = Tail(path)
+    runs = RunLog(path, retry=retry, prices=prices, name=name)
+    for record in tail.read_available():
+        runs.apply(record)
+    for index in runs.runs:
+        index.drain_delta()
+    runs.take_runs_changed()
+    return tail, runs
 
 
 def default_sub_key(value: dict[str, Any]) -> str:
@@ -2140,31 +2195,57 @@ def _burst_hint(count: int, first_t: float, last_t: float) -> str | None:
 
 
 def scan_runs(
-    directory: str | Path, served: RunLog | None = None
+    directory: str | Path,
+    served: RunLog | None = None,
+    *,
+    recursive: bool = False,
+    always: tuple[str | Path, ...] = (),
 ) -> list[dict[str, Any]]:
     """List known run logs in *directory*, newest first (for /api/runs).
 
     A log's first record names only its first run. The *served* log may
     hold several (accrue-ui#33), so it is listed under its latest run — the
-    one the header shows — read from the index already in memory.
+    one the header shows — read from the index already in memory, and is
+    the one entry flagged ``served``.
+
+    *recursive* (``--runs-dir``, accrue-ui#38) walks the whole tree, for
+    projects that keep one run per folder — amana's
+    ``out/<run>/<model>/run.jsonl``, where every log has the same stem. Each
+    log is then named by its folder (see :func:`_run_names`), and a file
+    whose first record is not a ``pipeline_start`` is left out: a deep tree
+    holds data ``*.jsonl`` too, and those are not runs. The non-recursive
+    sibling listing keeps listing every ``*.jsonl`` by its stem.
+
+    *always* are logs listed even when the scan would not find them — the
+    launch log, so a server switched away from it can always switch back.
     """
     directory = Path(directory)
-    runs = []
-    if not directory.is_dir():
-        return runs
     served_path = served.path.resolve() if served is not None else None
-    for path in directory.glob("*.jsonl"):
-        # `<run>.prompts.jsonl` capture sidecars live right beside their run
-        # log and match the glob; they are not runs (accrue-ui#27).
-        if is_sidecar(path):
-            continue
+    found: list[Path] = []
+    if directory.is_dir():
+        found = (
+            _walk_logs(directory) if recursive else sorted(directory.glob("*.jsonl"))
+        )
+    # `<run>.prompts.jsonl` capture sidecars live right beside their run
+    # log and match the glob; they are not runs (accrue-ui#27).
+    found = [p for p in found if not is_sidecar(p)]
+    seen = {p.resolve() for p in found}
+    pinned = {Path(p).resolve() for p in always}
+    for extra in always:
+        extra = Path(extra)
+        if extra.resolve() not in seen and extra.is_file():
+            found.append(extra)
+            seen.add(extra.resolve())
+    runs = []
+    for path in found:
         try:
             st = path.stat()
         except OSError:
             continue
         started_at = None
         run_id = path.stem
-        if served is not None and path.resolve() == served_path:
+        is_served = served is not None and path.resolve() == served_path
+        if is_served:
             latest = served.latest
             run_id = latest.id
             started_at = _iso_utc(latest.started_at) if latest.started_at else None
@@ -2174,6 +2255,8 @@ def scan_runs(
                 run_id = first.get("run_id") or run_id
                 parsed = _parse_iso(first.get("started_at"))
                 started_at = _iso_utc(parsed) if parsed else None
+            elif recursive and path.resolve() not in pinned:
+                continue
         # Live means "being written to right now" — same rule as
         # RunIndex.is_live(), and for the same reason (an interrupted run
         # has no pipeline_end and is not live because of it).
@@ -2186,13 +2269,61 @@ def scan_runs(
                 "path": str(path),
                 "started_at": started_at,
                 "live": live,
-                "_sort": started_at or mtime_iso,
+                "served": is_served,
+                # Same start (a rerun of one config): the fresher file first.
+                "_sort": (started_at or mtime_iso, st.st_mtime),
+                "_path": path,
             }
         )
+    if recursive:
+        # Named after filtering: a data *.jsonl beside a run log must not
+        # make its folder look like it holds two runs.
+        root = directory.resolve()
+        inside = [r["_path"] for r in runs if r["_path"].resolve().is_relative_to(root)]
+        names = _run_names(inside, directory)
+        for r in runs:
+            r["name"] = names.get(r["_path"], r["name"])
     runs.sort(key=lambda r: r["_sort"], reverse=True)
     for r in runs:
-        del r["_sort"]
+        del r["_sort"], r["_path"]
     return runs
+
+
+def _walk_logs(root: Path) -> list[Path]:
+    """Every ``*.jsonl`` under *root*, sorted, without following symlinked
+    directories (a link back up the tree would never end) or descending
+    into dot-directories (``.git``, ``.venv``: never runs, often huge)."""
+    logs = []
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        base = Path(folder)
+        logs.extend(base / f for f in sorted(files) if f.endswith(".jsonl"))
+    return logs
+
+
+def _run_names(paths: list[Path], root: Path) -> dict[Path, str]:
+    """Name each log by its folder relative to *root* (accrue-ui#38).
+
+    amana writes ``out/<run>/<model>/run.jsonl``: the stem says nothing and
+    the folder says everything, so ``<run>/<model>`` is the name. A folder
+    holding several logs names each ``<folder>/<stem>`` instead, and a log
+    at the top of *root* has no folder to go by, so it keeps its stem.
+    Names are labels only — a log is always identified by its path.
+    """
+    root = root.resolve()
+    per_folder: dict[Path, int] = {}
+    for path in paths:
+        per_folder[path.parent] = per_folder.get(path.parent, 0) + 1
+    names = {}
+    for path in paths:
+        folder = path.resolve().parent.relative_to(root)
+        if folder == Path("."):
+            names[path] = path.stem
+        elif per_folder[path.parent] == 1:
+            names[path] = folder.as_posix()
+        else:
+            names[path] = (folder / path.stem).as_posix()
+    return names
 
 
 def _read_first_record(path: Path) -> dict[str, Any] | None:

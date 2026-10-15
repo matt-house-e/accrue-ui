@@ -14,7 +14,7 @@ derived from the log (plus the small retry surface below).
 pip install -e ".[dev]"   # Dev install
 pytest                    # Run tests
 ruff check .              # Lint (CI enforces both)
-accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr] [--prices file.toml] [--port 7607] [--no-browser]
+accrue-ui [run_log] [--runs-dir dir] [--pipeline mod:attr] [--data mod:attr] [--prices file.toml] [--port 7607] [--no-browser]
 ```
 
 `--pipeline` names either a `Pipeline` (then `--data` is required: a
@@ -23,6 +23,10 @@ zero-arg callable returning `(pipeline, data)` — optionally
 `(pipeline, data, config)` when the run used a custom `EnrichmentConfig`.
 Launch from the directory the run itself used, so the retry finds the same
 checkpoint.
+
+`--runs-dir` lists every run log under a folder, recursively, each named by
+its folder (amana: `out/<run>/<model>/run.jsonl`). With no `run_log` it
+serves the newest one.
 
 `--prices` merges a TOML file of per-model USD/MTok prices over the built-in
 table in `server/pricing.py`; a bad file exits 1 before the port is bound.
@@ -47,7 +51,11 @@ Backend lives in `accrue_ui/server/`:
   - `POST /api/retry` — retry failed rows: `{rows}`, `{group}` or `{all}`
     (requires `--pipeline`; 409 otherwise, while one is already running, and
     for a run that is not the latest in its file or had checkpointing off)
-  - `GET /api/runs` — list known run logs
+  - `GET /api/runs` — list known run logs (siblings, or the `--runs-dir`
+    tree, plus the launch log)
+  - `POST /api/runs/select` — serve another listed log: `{path}`, matched
+    against a fresh scan (404 for anything unlisted). It swaps the log for
+    every client and resets their streams. Retry stays bound to the launch log.
 - **`tail.py`** — poll follower: `stat` every ~250ms + read appended bytes,
   partial-line safe. Polling on purpose — **no inotify, it breaks on WSL2**.
   Identity is inode **plus the first 64 bytes**, re-checked every poll: a log

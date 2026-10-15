@@ -1,9 +1,10 @@
 """Command-line entry point for accrue-ui.
 
-``accrue-ui [run_log] [--pipeline mod:attr] [--data mod:attr]
-[--prices file.toml] [--port 7607] [--no-browser]`` resolves the run log
-(explicit path, else the newest ``*.jsonl`` under ``./.accrue/runs``,
-capture sidecars skipped), generates a fresh URL-safe launch token, builds
+``accrue-ui [run_log] [--runs-dir dir] [--pipeline mod:attr] [--data
+mod:attr] [--prices file.toml] [--port 7607] [--no-browser]`` resolves the
+run log (explicit path, else the newest run under ``--runs-dir``, else the
+newest ``*.jsonl`` under ``./.accrue/runs``, capture sidecars skipped),
+generates a fresh URL-safe launch token, builds
 the server app, **binds the loopback port**, and only then
 prints the tokenized URL and opens the browser — uvicorn serves on the
 socket already in hand, bound to **127.0.0.1 only**, hardcoded, no flag to
@@ -36,7 +37,7 @@ from fastapi import FastAPI
 
 from . import __version__
 from .server.app import create_app
-from .server.index import is_sidecar
+from .server.index import is_sidecar, scan_runs
 from .server.pricing import PricesError
 
 #: Loopback only, on purpose. There is deliberately no --host flag.
@@ -54,7 +55,20 @@ def build_parser() -> argparse.ArgumentParser:
         "run_log",
         nargs="?",
         default=None,
-        help="Path to a JSONL run log. Defaults to the latest log under .accrue/runs/.",
+        help=(
+            "Path to a JSONL run log. Defaults to the latest run under "
+            "--runs-dir, else the latest log under .accrue/runs/."
+        ),
+    )
+    parser.add_argument(
+        "--runs-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Folder to list run logs from, searched recursively; each run is "
+            "named by its folder (e.g. out/<run>/<model>/run.jsonl). Defaults "
+            "to the run log's own folder."
+        ),
     )
     parser.add_argument(
         "--pipeline",
@@ -160,14 +174,35 @@ def bind_loopback(port: int) -> socket.socket:
     return sock
 
 
+def newest_in_runs_dir(runs_dir: Path) -> Path | None:
+    """The newest run under *runs_dir*, by the same rule the picker sorts by."""
+    runs = scan_runs(runs_dir, recursive=True)
+    return Path(runs[0]["path"]) if runs else None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    runs_dir = Path(args.runs_dir) if args.runs_dir is not None else None
+    if runs_dir is not None and not runs_dir.is_dir():
+        print(f"accrue-ui: --runs-dir is not a folder: {runs_dir}", file=sys.stderr)
+        return 1
 
     if args.run_log is not None:
         run_log = Path(args.run_log)
         if not run_log.is_file():
             print(f"accrue-ui: run log not found: {run_log}", file=sys.stderr)
             return 1
+    elif runs_dir is not None:
+        found = newest_in_runs_dir(runs_dir)
+        if found is None:
+            print(
+                f"accrue-ui: no run log under {runs_dir}/ "
+                "(a run log starts with a pipeline_start record)",
+                file=sys.stderr,
+            )
+            return 1
+        run_log = found
     else:
         found = newest_run_log()
         if found is None:
@@ -194,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             run_log,
             token=token,
             port=args.port,
+            runs_dir=runs_dir,
             pipeline=args.pipeline,
             data=args.data,
             prices=args.prices,

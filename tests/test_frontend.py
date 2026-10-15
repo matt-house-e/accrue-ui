@@ -284,8 +284,9 @@ def test_runs_fixture_shape():
     doc = json.loads((FIXTURES / "runs.json").read_text())
     assert set(doc) == {"runs"}
     for run in doc["runs"]:
-        assert set(run) == {"id", "name", "path", "started_at", "live"}
+        assert set(run) == {"id", "name", "path", "started_at", "live", "served"}
     assert doc["runs"][0]["live"] is True
+    assert [r["served"] for r in doc["runs"]].count(True) == 1
 
 
 def test_events_fixture_shape():
@@ -338,8 +339,10 @@ def test_delta_reset_triggers_a_full_snapshot_refetch():
     assert body.index("if (delta.reset)") < body.index("delta.cells")
     # … refetches the whole snapshot and short-circuits the stale merge.
     reset_region = body.split("if (delta.reset)", 1)[1].split("let gap", 1)[0]
-    assert "loadRun()" in reset_region
+    assert "refetchRun()" in reset_region
     assert "return;" in reset_region
+    refetch = store.split("function refetchRun", 1)[1].split("\n}\n", 1)[0]
+    assert "loadRun()" in refetch
 
 
 def test_the_event_stream_follows_a_selection_the_store_changes():
@@ -616,6 +619,43 @@ def test_run_chip_does_not_repeat_the_id():
     assert "run.name !== run.id" in app_js
     assert "${runLabel(run)}" in app_js
     assert "${r.name} / ${r.id}" not in app_js
+
+
+def test_run_menu_switches_the_served_log():
+    """The run chip's menu items switch logs (accrue-ui#38), not just list."""
+    app_js = (STATIC / "app.js").read_text()
+    menu = app_js.split("function RunMenu", 1)[1].split("function RunChip", 1)[0]
+    # amana folders share run ids: the path is the only unique key.
+    assert "key=${r.path}" in menu
+    assert "onClick=${() => pick(r)}" in menu
+    assert "switchLog(r)" in menu
+    switch = app_js.split("async function switchLog", 1)[1].split("\n}\n", 1)[0]
+    # Stream closed across the swap, pin dropped, snapshot reloaded.
+    assert switch.index("disconnect()") < switch.index("selectLog(entry.path)")
+    assert switch.index("selectLog(entry.path)") < switch.index(
+        "selectedRun.value = null"
+    )
+    assert "connect()" in switch.split("finally", 1)[1]
+    store = (STATIC / "lib" / "store.js").read_text()
+    select = store.split("export async function selectLog", 1)[1].split("\n}\n", 1)[0]
+    assert '"/api/runs/select"' in select
+    assert 'method: "POST"' in select
+    assert '"Content-Type": "application/json"' in select
+
+
+def test_store_drops_what_belonged_to_another_log():
+    store = (STATIC / "lib" / "store.js").read_text()
+    load = store.split("export async function loadRun", 1)[1].split("\n}\n", 1)[0]
+    assert "prev.log?.path !== data.log?.path" in load
+    forget = store.split("function forgetRun", 1)[1].split("\n}\n", 1)[0]
+    assert "runEpoch++" in forget
+    values = store.split("export async function loadValuesFor", 1)[1].split("\n}\n", 1)[
+        0
+    ]
+    assert "if (epoch !== runEpoch) return;" in values
+    # A reset during a refetch queues another rather than being dropped.
+    refetch = store.split("function refetchRun", 1)[1].split("\n}\n", 1)[0]
+    assert "refetchAgain = true" in refetch
 
 
 def test_attempt_count_is_pluralized():

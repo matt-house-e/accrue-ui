@@ -64,7 +64,9 @@ Full snapshot of the run, including the complete cell-state array.
 {
   "run": {
     "id": "2026-08-17a",           // run identifier (log-derived)
-    "name": "acme-enrichment",     // log-derived name (the file's stem)
+    "name": "acme-enrichment",     // log-derived name: the file's stem, or
+                                   // under --runs-dir its folder (same as
+                                   // /api/runs' `name`)
     "started_at": "2026-08-17T09:35:12Z",  // string | null: absent or
                                    // unparseable pipeline_start.started_at
     "live": true,                  // log was written to in the last few
@@ -162,6 +164,10 @@ Full snapshot of the run, including the complete cell-state array.
   "overview": {                    // pipeline blueprint (see below); a log with
     "present": false               // no manifest carries ONLY {"present": false}
   },
+  "log": {                         // the log file being served
+    "path": ".accrue/runs/2026-08-17a.jsonl",  // as /api/runs lists it
+    "name": "acme-enrichment"      // same as run.name
+  },
   "file_runs": [                   // every run in the log file, newest first;
     {                              // one entry for a one-run file
       "id": "2026-08-17a",         // pass as ?run= to read this run
@@ -182,6 +188,13 @@ earlier run's `retry` block reads `available: false` with
 `reason: "retry re-runs the latest run in this file; switch to it to retry"`:
 the `--pipeline`/`--data` the server was launched with belong to the latest
 run.
+
+`log.path` changes when `POST /api/runs/select` switches logs. A client
+compares it, as well as `run.id`, to tell when its cached rows are stale,
+because two logs under one `--runs-dir` can hold runs with the same id.
+While the server shows any log other than the one it was launched with,
+every run's `retry` block reads `available: false` with
+`reason: "retry re-runs <launch log>, the log this server was launched with; switch back to it to retry"`.
 
 Error groups split one exception class by message: a max_tokens truncation
 and a 429 are both `LLMAPIError`, but they are separate causes. `retryable` is
@@ -734,23 +747,72 @@ Known run logs, newest first.
   "runs": [
     {
       "id": "2026-08-17a",         // run id from pipeline_start, else the stem
-      "name": "acme-enrichment",   // log-derived: the file's stem
-      "path": ".accrue/runs/2026-08-17a.jsonl",
+      "name": "acme-enrichment",   // log-derived label (see below)
+      "path": ".accrue/runs/2026-08-17a.jsonl",  // the identity: pass it to
+                                   // POST /api/runs/select
       "started_at": "2026-08-17T09:35:12Z",  // string | null
-      "live": true                 // mtime recency, same rule as run.live
+      "live": true,                // mtime recency, same rule as run.live
+      "served": true               // the log the server is showing now;
+                                   // exactly one entry
     }
   ]
 }
 ```
 
+What is listed:
+
+- **Default:** the `*.jsonl` files beside the launch log, each named by its
+  stem. Capture sidecars (`*.prompts.jsonl`) are skipped.
+- **`--runs-dir <dir>`:** every run log anywhere under the folder
+  (accrue-ui#38). A file is listed only when its first record is a
+  `pipeline_start`, because a deep tree also holds data `*.jsonl`.
+  Dot-directories are skipped and directory symlinks are not followed. Each
+  log is named by its folder relative to the dir, so amana's
+  `out/<run>/<model>/run.jsonl` reads `<run>/<model>`. A folder holding
+  several logs names each `<folder>/<stem>`, and a log at the top of the dir
+  keeps its stem.
+- **Always:** the launch log, wherever it lives, so a server switched away
+  from it can switch back.
+
+Sorted by `started_at` (else mtime), newest first. Ties go to the more
+recently written file.
+
 `name` and `id` are frequently the same string (a log named after its run).
 Clients should show `name / id` only when they differ, and the id alone
-otherwise.
+otherwise. Names are labels, and two can collide. `path` identifies a log.
 
 Other logs are listed by their first `pipeline_start`. The served log is
 listed by its **latest** run (`id`, `started_at`), matching `/api/run`'s
 `run` with no `?run=`, because a file holding several runs has more than one
 `pipeline_start`.
+
+## `POST /api/runs/select`
+
+Serve another log from the list. The request body is JSON:
+
+```json
+{"path": "out/2026-09-24-full-a/gpt-5-mini/run.jsonl"}
+```
+
+The response is the entry now served, `{"path": ..., "name": ...}`. The
+server swaps the log it follows for **every client**, not only the one that
+asked, and sends each open `/api/events` stream a `reset`. The client that
+asked should drop any `?run=` pin, because a run id from the old file means
+nothing in the new one, and then reload `/api/run`. Selecting the log
+already served is a no-op 200.
+
+| Status | When |
+|--------|------|
+| 200 | Switched (or already served) |
+| 400 | Body is not JSON, or `path` is missing or not a string |
+| 404 | `path` is not an entry of `/api/runs`. The server re-scans and accepts only a listed log, so it can never be pointed at any other file |
+| 405 | Any method but POST |
+| 415 | The body was not declared as JSON |
+
+Retry stays with the launch log. While another log is served, `/api/run`'s
+`retry` block names the launch log as the reason (see `GET /api/run`), and
+`POST /api/retry` answers 409. A retry already in flight keeps appending to
+the launch log, so its results show once you switch back.
 
 ## `GET /api/report`
 

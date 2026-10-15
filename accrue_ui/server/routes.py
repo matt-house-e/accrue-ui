@@ -19,13 +19,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .events import DeltaBroadcaster
-from .index import RunIndex, RunLog, scan_runs
+from .index import RunIndex, RunLog, open_log, scan_runs
 from .query import QueryError, parse_query, select_rows
 from .report import render_report, report_filename
 from .retry import ALREADY_RUNNING, RetryController
@@ -125,11 +126,88 @@ async def get_cell(
     return detail
 
 
+def _list_runs(request: Request) -> list[dict[str, Any]]:
+    """The run logs this server can show: the ``--runs-dir`` tree (else the
+    launch log's siblings), plus the launch log itself wherever it lives."""
+    state = request.app.state
+    return scan_runs(
+        state.runs_dir,
+        served=state.runs,
+        recursive=state.runs_recursive,
+        always=(state.retry.run_path,),
+    )
+
+
 @router.get("/runs")
 async def get_runs(request: Request) -> dict:
-    """Known run logs (siblings of the served log), newest first."""
-    runs: RunLog = request.app.state.runs
-    return {"runs": scan_runs(request.app.state.run_path.parent, served=runs)}
+    """Known run logs, newest first.
+
+    The scan reads the first line of every log it finds, so it runs in a
+    worker thread: a deep ``--runs-dir`` tree must not stall the SSE flush.
+    """
+    return {"runs": await asyncio.to_thread(_list_runs, request)}
+
+
+@router.post("/runs/select")
+async def post_select_run(request: Request) -> dict:
+    """Serve another log from the run list: ``{"path": <a listed path>}``.
+
+    The path must be one ``/api/runs`` lists — an exact match against a
+    fresh scan, so a client can never point the server at any other file
+    (404 otherwise). The new log is read off the event loop, then swapped in
+    whole (``tail`` and ``runs``) and marked reset: every SSE
+    client, in every tab, refetches its snapshot. The follower in ``app.py``
+    retires the old tail. Retry stays bound to the launch log, so on any
+    other log it reports unavailable (see ``RunIndex.retry_block``).
+    """
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="body must be JSON") from None
+    wanted = body.get("path") if isinstance(body, dict) else None
+    if not isinstance(wanted, str) or not wanted:
+        raise HTTPException(status_code=400, detail='expected {"path": "<run log>"}')
+    try:
+        target = Path(wanted).resolve()
+    except (ValueError, OSError):
+        # An embedded NUL is a ValueError from lstat: no listed log has one.
+        raise HTTPException(
+            status_code=404, detail=f"no run log {wanted!r} listed"
+        ) from None
+    state = request.app.state
+    # One switch at a time: two interleaved swaps could leave the follower
+    # on one log and the snapshot on another.
+    async with state.select_lock:
+        listed = await asyncio.to_thread(_list_runs, request)
+        entry = next((r for r in listed if Path(r["path"]).resolve() == target), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"no run log {wanted!r} listed")
+        if not entry["served"]:
+            tail, runs = await asyncio.to_thread(
+                open_log,
+                Path(entry["path"]),
+                retry=state.retry,
+                prices=state.prices,
+                name=entry["name"],
+            )
+            # No await between these: no reader sees half a swap.
+            state.tail, state.runs = tail, runs
+            runs.mark_reset()
+    return {"path": entry["path"], "name": entry["name"]}
+
+
+@router.api_route(
+    "/runs/select",
+    methods=["GET", "HEAD", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
+)
+async def select_method_not_allowed() -> JSONResponse:
+    """POST-only, like ``/api/retry`` (see :func:`retry_method_not_allowed`)."""
+    return JSONResponse(
+        {"detail": "Method Not Allowed"},
+        status_code=405,
+        headers={"Allow": "POST"},
+    )
 
 
 @router.get("/report")
