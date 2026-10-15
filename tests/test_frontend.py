@@ -463,6 +463,23 @@ def test_null_renders_distinct_from_an_empty_string():
     assert ".values-table td.value.json { white-space: pre-wrap; }" in css
 
 
+def test_overview_shows_type_mismatch_and_every_batch_id():
+    """#40: a field whose values don't match its declared type gets a hover
+    note, and a batch step lists every id it submitted."""
+    overview = (STATIC / "views" / "overview.js").read_text()
+    css = (STATIC / "style.css").read_text()
+    assert "const kinds = f.type_mismatch;" in overview
+    # The accrue 1.5.1 pointer only for the stale-manifest case it explains.
+    assert 'f.type === "str" && kinds.includes("object")' in overview
+    assert "<${MismatchChip} f=${f} />" in overview
+    assert "<${BatchIds} ids=${o.batch_ids} />" in overview
+    assert "ids.map((id) =>" in overview  # every id, none truncated
+    # Retry amber, the existing "look again" tone; nothing under the 11px floor.
+    mismatch = css.split(".ov-mismatch {", 1)[1].split("}", 1)[0]
+    assert "var(--retry-text)" in mismatch
+    assert "font-size: 11px" in mismatch
+
+
 def test_search_filter_and_sort_are_one_server_query():
     """The grid shows exactly /api/rows' list whenever a query is active
     (accrue-ui#37): nothing is filtered client-side, so the summary line and
