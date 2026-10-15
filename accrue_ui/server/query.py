@@ -399,8 +399,21 @@ class _View:
     keeps applying records (see the module docstring)."""
 
     def __init__(self, index: RunIndex):
-        self.steps: list[StepState] = list(index.steps)
-        self.states = index.states
+        # The step list and the state array must describe the same grid: a
+        # step appended (or a row grown) between the two reads would give this
+        # scan the wrong stride. Re-read until they agree — the loop applies
+        # one record at a time, so a second try almost always does.
+        steps: list[StepState] = []
+        states = index.states
+        for _ in range(8):
+            steps = list(index.steps)
+            states = index.states
+            if len(index.steps) == len(steps) and len(states) == index.nrows * len(
+                steps
+            ):
+                break
+        self.steps = steps
+        self.states = states
         self.nsteps = len(self.steps)
         self.nrows = min(index.nrows, len(self.states) // max(1, self.nsteps))
         self.by_name = {s.name: i for i, s in enumerate(self.steps)}
