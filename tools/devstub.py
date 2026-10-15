@@ -38,6 +38,8 @@ class StubHandler(SimpleHTTPRequestHandler):
             return self._json("run.json")
         if path == "/api/values":
             return self._json("values_1281.json")
+        if path == "/api/rows":
+            return self._json("rows.json")
         if path.startswith("/api/cell/"):
             return self._json("cell_web_search_1284.json")
         if path == "/api/runs":

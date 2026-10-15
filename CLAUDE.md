@@ -100,7 +100,18 @@ CDN at runtime).
 Views:
 
 - `grid.js` — the run grid; status and data render modes; hand-rolled row
-  virtualization (no virtualization library).
+  virtualization (no virtualization library). Data mode: one column per
+  field under a step band, pinned key column, columns windowed on
+  `scrollLeft` too, px widths throughout (a `1fr` lets bands and rows
+  drift apart once a column is resized).
+- `columns.js` — the data-column model (manifest `produces` first, then
+  what rows produced) and the column picker.
+- `filters.js` — search box with scope, per-column filter menus typed from
+  the manifest, per-step state menu, the filter bar. Every control writes
+  the store's query signals; the store makes one `/api/rows` request and the
+  grid shows exactly its list. The query lives in the URL hash.
+- `lib/popover.js` — anchored popover (fixed-positioned, like the tooltip
+  layer, so it escapes the scroller's overflow).
 - `inspector.js` — cell detail panel.
 - `triage.js` — failure triage.
 - `cost.js` — cost breakdown.

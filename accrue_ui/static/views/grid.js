@@ -11,17 +11,24 @@ import {
   cellsVersion,
   cellStates,
   colWidths,
+  columnFilters,
   cycleSubKey,
   errorGroupFor,
   hiddenCols,
   loadValuesFor,
-  rowFilter,
+  queryActive,
+  rowsError,
+  rowsLoading,
   searchQuery,
+  searchScope,
   select,
   selectedSubKey,
   selection,
+  serverRows,
+  setSort,
   showInternalFields,
   snapshot,
+  sortSpec,
   sseStatus,
   subKeyOf,
   subKeysFor,
@@ -31,6 +38,7 @@ import {
   wrapCells,
 } from "../lib/store.js";
 import { dataColumns } from "./columns.js";
+import { ColumnFilterButton, StateMenuButton, highlight } from "./filters.js";
 
 const ROW_H = 32; // px, one-line cells
 const ROW_H_WRAP = 66; // px, three clamped lines
@@ -55,31 +63,16 @@ const LEGEND = [
   [6, "Skipped"],
 ];
 
-const FILTER_STATE = { errors: 5, retrying: 4, skipped: 6 };
-
-function computeRows(arr, nsteps, filter, query) {
+// The row list: the server's answer whenever a search, filter, sort or the
+// global state chip is active (accrue-ui#37) — nothing is filtered on the
+// client any more, so the summary and the grid agree — else every row. While
+// a query is active with no answer yet, the list is empty, not unfiltered.
+function computeRows(arr, nsteps, sr, active) {
   if (!arr || !nsteps) return [];
   const total = Math.floor(arr.length / nsteps);
-  const want = FILTER_STATE[filter];
-  const q = query.trim().toLowerCase();
-  const out = [];
-  for (let r = 0; r < total; r++) {
-    if (want !== undefined) {
-      let hit = false;
-      for (let s = 0; s < nsteps; s++) {
-        if (arr[r * nsteps + s] === want) {
-          hit = true;
-          break;
-        }
-      }
-      if (!hit) continue;
-    }
-    if (q) {
-      const vrow = valuesCache.get(r);
-      if (!vrow || !String(vrow.key).toLowerCase().includes(q)) continue;
-    }
-    out.push(r);
-  }
+  if (active) return sr ? sr.rows.filter((r) => r < total) : [];
+  const out = new Array(total);
+  for (let r = 0; r < total; r++) out[r] = r;
   return out;
 }
 
@@ -165,9 +158,18 @@ function StepBand({ step, span }) {
       ${step.name}
       <span class="level-chip">L${step.level}</span>
       ${step.mode === "batch" && html`<span class="batch-chip">batch</span>`}
+      <${StateMenuButton} step=${step.name} />
     </div>
     <div class="done-count">${fmtInt(step.done)} / ${fmtInt(step.total)}</div>
   </div>`;
+}
+
+// Clicking a field name cycles its sort: none -> asc -> desc -> none.
+function cycleSort(col, step, field) {
+  const s = sortSpec.value;
+  const dir = s && s.col === col ? (s.dir === "asc" ? "desc" : null) : "asc";
+  const sub = subKeysFor(step, field) ? selectedSubKey(step, field) : null;
+  setSort(col, dir, sub);
 }
 
 function FieldHead({ col, width }) {
@@ -178,8 +180,21 @@ function FieldHead({ col, width }) {
     </div>`;
   }
   const subKeys = subKeysFor(step.name, field);
-  return html`<div class="col-head field-head" key=${col.id}>
-    <div class="field-name" title=${field}>${field}</div>
+  const sort = sortSpec.value;
+  const sorted = sort && sort.col === col.id ? sort.dir : null;
+  const filtered = !!columnFilters.value[col.id];
+  return html`<div
+    class=${`col-head field-head${sorted ? " sorted" : ""}${filtered ? " filtered" : ""}`}
+    key=${col.id}
+  >
+    <button
+      class="field-name"
+      title=${`${field} — click to sort`}
+      onClick=${() => cycleSort(col.id, step.name, field)}
+    >
+      ${field}${sorted && html`<span class="sort-glyph">${sorted === "asc" ? "↑" : "↓"}</span>`}
+    </button>
+    <${ColumnFilterButton} col=${col.id} step=${step.name} field=${field} />
     ${subKeys &&
     html`<button
       class="field-chip subkey-chip"
@@ -230,14 +245,15 @@ function subKeysTip(entry) {
 }
 
 // A completed cell's value: a field present but null renders as a faint
-// "null", so it never looks like an empty string (accrue-ui#36).
-function Val({ v, isNull }) {
+// "null", so it never looks like an empty string (accrue-ui#36). `hl` is the
+// search text to mark, when the search covers this column.
+function Val({ v, isNull, hl }) {
   return isNull
     ? html`<span class="val null">null</span>`
-    : html`<span class="val">${v || ""}</span>`;
+    : html`<span class="val">${hl ? highlight(v || "", hl) : v || ""}</span>`;
 }
 
-function DataCell({ step, stepName, field, row, state, vrow }) {
+function DataCell({ step, stepName, field, row, state, vrow, hl }) {
   const sel = selection.value;
   const isSel = sel && sel.step === stepName && sel.row === row;
   const cell = vrow && vrow.cells ? vrow.cells[stepName] : null;
@@ -268,9 +284,9 @@ function DataCell({ step, stepName, field, row, state, vrow }) {
     body = html`<${IconDot} size=${12} />`;
   } else if (state === 3) {
     body = html`<span class="prefix"><${IconBolt} size=${11} /></span>
-      <${Val} v=${v} isNull=${isNull} />`;
+      <${Val} v=${v} isNull=${isNull} hl=${hl} />`;
   } else {
-    body = html`<${Val} v=${v} isNull=${isNull} />`;
+    body = html`<${Val} v=${v} isNull=${isNull} hl=${hl} />`;
   }
   return html`<button
     class=${`cell dcell s${state}${isSel ? " sel" : ""}${tip ? " has-tip" : ""}`}
@@ -288,8 +304,10 @@ export function Grid() {
   const version = cellsVersion.value; // subscribe to cell mutations
   const vversion = valuesVersion.value; // subscribe to values loads
   const mode = viewMode.value;
-  const filter = rowFilter.value;
-  const query = searchQuery.value;
+  const active = queryActive();
+  const sr = serverRows.value;
+  const query = searchQuery.value.trim();
+  const scope = searchScope.value;
   const arr = cellStates.value;
   const steps = snap.steps;
   const nsteps = steps.length;
@@ -303,10 +321,7 @@ export function Grid() {
   // dependency here: including it made loading values recompute the row
   // list, which changed its identity, which re-fired the fetch effect below,
   // which loaded values — a self-sustaining ~6Hz refetch loop.
-  const rows = useMemo(
-    () => computeRows(arr, nsteps, filter, query),
-    [arr, nsteps, filter, query, version]
-  );
+  const rows = useMemo(() => computeRows(arr, nsteps, sr, active), [arr, nsteps, sr, active]);
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
   const total = arr ? Math.floor(arr.length / nsteps) : 0;
@@ -377,7 +392,12 @@ export function Grid() {
       loadValuesFor(missingRows(rowsRef.current, first, last));
     }, 150);
     return () => clearTimeout(timer);
-  }, [first, last, filter, query, rows.length]);
+  }, [first, last, rows]);
+
+  // Highlight search hits in the columns the search covers.
+  const hlKeys = query && (scope === "all" || scope === "keys") ? query : null;
+  const hlFor = (col) =>
+    query && (scope === "all" || scope === col.id) ? query : null;
 
   const gridTemplate = data
     ? template(labelW, widths, cFirst, cLast)
@@ -399,7 +419,7 @@ export function Grid() {
     >
       <div class=${`row-label${data ? " pinned" : ""}`}>
         <span class="row-idx">${r}</span>
-        <span class="row-key">${vrow ? vrow.key : ""}</span>
+        <span class="row-key">${vrow ? highlight(String(vrow.key), hlKeys) : ""}</span>
       </div>
       ${lead}
       ${cols.slice(cFirst, cLast).map((col) => {
@@ -421,6 +441,7 @@ export function Grid() {
           row=${r}
           state=${state}
           vrow=${vrow}
+          hl=${hlFor(col)}
         />`;
       })}
       ${tail}
@@ -439,14 +460,30 @@ export function Grid() {
     }
   }
 
+  // Positions in the list, not row indices: a sorted list has no span.
   const windowLabel =
     rows.length === 0
-      ? "no rows match"
-      : `showing ${rows[Math.min(first, rows.length - 1)]}–${rows[last - 1]}`;
+      ? active && !sr
+        ? rowsError.value
+          ? "query failed"
+          : "loading…"
+        : "no rows match"
+      : `showing ${fmtInt(Math.min(first, rows.length - 1) + 1)}–${fmtInt(last)}`;
   const countLabel =
     rows.length === total
       ? `${fmtInt(total)} rows`
       : `${fmtInt(rows.length)} of ${fmtInt(total)} rows`;
+  const empty =
+    rows.length === 0 &&
+    html`<div class="grid-empty">
+      ${active && !sr
+        ? rowsError.value
+          ? html`<span class="filter-error">${rowsError.value}</span>`
+          : rowsLoading.value
+            ? "Querying…"
+            : "Querying…"
+        : "No rows match."}
+    </div>`;
 
   const head = data
     ? html`<div class="head-row" style=${rowStyle}>
@@ -490,6 +527,7 @@ export function Grid() {
       >
         ${visible}
       </div>
+      ${empty}
     </div>
     <div class="grid-foot">
       <span>${countLabel} · ${windowLabel}</span>

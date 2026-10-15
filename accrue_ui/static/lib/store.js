@@ -1,6 +1,6 @@
 // Signals-based state store + fetch helpers. All requests are same-origin
 // relative /api/* paths (see docs/api-shapes.md).
-import { signal, batch } from "@preact/signals";
+import { signal, batch, effect } from "@preact/signals";
 
 export const STATE = {
   PENDING: 0,
@@ -41,6 +41,18 @@ export const subKeyChoice = signal({});
 export const hiddenCols = signal([]); // colIds the column picker hid
 export const wrapCells = signal(false); // truncate (one line) | wrap (3 lines)
 export const colWidths = signal({}); // colId -> px; memory only, not in the hash
+// ---- query: search, filters, sort (accrue-ui#37) -----------------------
+// The server answers /api/rows whenever any of these is set; the grid then
+// shows exactly its row list (docs/api-shapes.md).
+export const columnFilters = signal({}); // colId -> {op, v?, sub?}
+export const sortSpec = signal(null); // {col, dir, sub?} | null
+export const searchScope = signal("all"); // "all" | "keys" | colId
+export const serverRows = signal(null); // {rows, total, matched} | null
+export const rowsError = signal(null); // string | null: the last query failed
+export const rowsLoading = signal(false);
+export const rowsStale = signal(false); // cells changed since the last query
+// The global state chips, as the server clause they ride (any step).
+export const FILTER_STATE = { errors: 5, retrying: 4, skipped: 6 };
 export const sseStatus = signal("idle"); // 'idle' | 'connected'
 export const cellDetail = signal(null); // /api/cell payload for selection
 export const cellDetailLoading = signal(false);
@@ -218,6 +230,10 @@ function forgetRun() {
   selection.value = null;
   cellDetail.value = null;
   retryError.value = null;
+  // The query inputs stay (they are hash state); the answer belonged to the
+  // old run's rows.
+  serverRows.value = null;
+  scheduleRows(0);
 }
 
 // Rows with a request in flight, so two renders never ask twice.
@@ -431,6 +447,10 @@ export function applyDelta(delta) {
         else if (!inGrid) gap = true;
       }
       cellsVersion.value++;
+      // A filtered or sorted list was computed over cells that just moved.
+      // Say so rather than re-query: re-sorting under the reader every flush
+      // would yank rows out from under them (the live behaviour is #53).
+      if (serverRows.value) rowsStale.value = true;
     }
     if (snap && delta.stats && Object.keys(delta.stats).length) {
       // rows_done and live are the delta-only stats keys: they belong to
@@ -481,3 +501,225 @@ export function applyDelta(delta) {
       });
   }
 }
+
+// ---- query: /api/rows -----------------------------------------------------
+//
+// Search, per-column filters, sort and the global state chip all become one
+// server query (docs/api-shapes.md, GET /api/rows); the grid shows exactly
+// the row list it returns. Nothing is filtered client-side any more, so the
+// summary line and the grid can never disagree.
+
+export function queryActive() {
+  return !!(
+    searchQuery.value.trim() ||
+    Object.keys(columnFilters.value).length ||
+    sortSpec.value ||
+    rowFilter.value !== "all"
+  );
+}
+
+// The filter clauses, in the server's shape. `exceptCol` leaves one column's
+// own clause out — what a facet request wants.
+export function queryClauses(exceptCol = null) {
+  const clauses = [];
+  for (const [col, f] of Object.entries(columnFilters.value)) {
+    if (col === exceptCol) continue;
+    clauses.push({ col, ...f });
+  }
+  const want = FILTER_STATE[rowFilter.value];
+  if (want !== undefined) clauses.push({ col: "*", op: "state", v: [want] });
+  return clauses;
+}
+
+export function queryParams({ facet = null, exceptCol = null } = {}) {
+  const p = new URLSearchParams();
+  const q = searchQuery.value.trim();
+  if (q) {
+    p.set("q", q);
+    if (searchScope.value !== "all") p.set("scope", searchScope.value);
+  }
+  const clauses = queryClauses(exceptCol);
+  if (clauses.length) p.set("filter", JSON.stringify(clauses));
+  const s = sortSpec.value;
+  if (s) {
+    p.set("sort", `${s.col}:${s.dir}`);
+    if (s.sub) p.set("sort_sub", s.sub);
+  }
+  if (facet) {
+    p.set("facet", facet);
+    p.set("only", "facet");
+  }
+  return p.toString();
+}
+
+export const ROWS_DEBOUNCE_MS = 200;
+let rowsSeq = 0; // a response older than the latest request is dropped
+let rowsTimer = null;
+
+export function scheduleRows(delay = ROWS_DEBOUNCE_MS) {
+  clearTimeout(rowsTimer);
+  rowsTimer = setTimeout(() => {
+    rowsTimer = null;
+    loadRows();
+  }, delay);
+}
+
+export async function loadRows() {
+  const seq = ++rowsSeq;
+  if (!queryActive()) {
+    batch(() => {
+      serverRows.value = null;
+      rowsError.value = null;
+      rowsLoading.value = false;
+      rowsStale.value = false;
+    });
+    return;
+  }
+  rowsLoading.value = true;
+  try {
+    const res = await fetch(apiPath(`/api/rows?${queryParams()}`));
+    if (seq !== rowsSeq) return;
+    if (!res.ok) {
+      // Keep the last good list on screen; say what went wrong beside it.
+      let message = `query failed (${res.status})`;
+      try {
+        const payload = await res.json();
+        message = payload.detail || message;
+      } catch {
+        // non-JSON error body: keep the status-code message
+      }
+      rowsError.value = message;
+      return;
+    }
+    const data = await res.json();
+    if (seq !== rowsSeq) return;
+    batch(() => {
+      serverRows.value = data;
+      rowsError.value = null;
+      rowsStale.value = false;
+    });
+  } catch (e) {
+    if (seq === rowsSeq) rowsError.value = String(e);
+  } finally {
+    if (seq === rowsSeq) rowsLoading.value = false;
+  }
+}
+
+// Value counts for one column over the rows matching every OTHER clause
+// (the server leaves the column's own clause out), for its checkbox facets.
+export async function loadFacet(col) {
+  try {
+    const res = await fetch(apiPath(`/api/rows?${queryParams({ facet: col, exceptCol: col })}`));
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.facet || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setFilter(col, clause) {
+  const next = { ...columnFilters.value };
+  if (clause) next[col] = clause;
+  else delete next[col];
+  columnFilters.value = next;
+}
+
+export function setSort(col, dir, sub = null) {
+  sortSpec.value = dir ? { col, dir, ...(sub ? { sub } : {}) } : null;
+}
+
+export function clearQuery() {
+  batch(() => {
+    searchQuery.value = "";
+    searchScope.value = "all";
+    columnFilters.value = {};
+    sortSpec.value = null;
+    rowFilter.value = "all";
+  });
+}
+
+// Any input change re-queries, debounced. effect() tracks only what is read
+// synchronously here, so loadRows' own reads (apiPath -> selectedRun) do not
+// re-arm it.
+effect(() => {
+  searchQuery.value;
+  searchScope.value;
+  columnFilters.value;
+  sortSpec.value;
+  rowFilter.value;
+  scheduleRows();
+});
+
+// ---- URL hash: the query is a bookmark ------------------------------------
+//
+// #q=&in=&f=<json>&sort=&sub=&rows=&hide=&wrap=1&view=data. Written with
+// replaceState (no history entry per keystroke) and read once at boot, before
+// the first loadRun, so a reload or a shared link restores the same view. The
+// launch-token scrub in app.js keeps the hash.
+
+let hashReady = false; // readHash() has run: writing before it would erase it
+
+export function hashFor() {
+  const p = new URLSearchParams();
+  const q = searchQuery.value.trim();
+  if (q) p.set("q", q);
+  if (searchScope.value !== "all") p.set("in", searchScope.value);
+  const filters = columnFilters.value;
+  if (Object.keys(filters).length) p.set("f", JSON.stringify(filters));
+  const s = sortSpec.value;
+  if (s) {
+    p.set("sort", `${s.col}:${s.dir}`);
+    if (s.sub) p.set("sub", s.sub);
+  }
+  if (rowFilter.value !== "all") p.set("rows", rowFilter.value);
+  if (hiddenCols.value.length) p.set("hide", hiddenCols.value.join(","));
+  if (wrapCells.value) p.set("wrap", "1");
+  if (viewMode.value === "data") p.set("view", "data");
+  return p.toString();
+}
+
+export function readHash() {
+  try {
+    const raw = window.location.hash.replace(/^#/, "");
+    if (!raw) return;
+    const p = new URLSearchParams(raw);
+    batch(() => {
+      if (p.has("q")) searchQuery.value = p.get("q");
+      if (p.has("in")) searchScope.value = p.get("in");
+      if (p.has("f")) {
+        try {
+          const f = JSON.parse(p.get("f"));
+          if (f && typeof f === "object" && !Array.isArray(f)) columnFilters.value = f;
+        } catch {
+          // a hand-edited hash: ignore the filters, keep the rest
+        }
+      }
+      const sort = p.get("sort");
+      const m = sort && /^(.+):(asc|desc)$/.exec(sort);
+      if (m) sortSpec.value = { col: m[1], dir: m[2], ...(p.get("sub") ? { sub: p.get("sub") } : {}) };
+      const chip = p.get("rows");
+      if (chip && (chip === "all" || chip in FILTER_STATE)) rowFilter.value = chip;
+      if (p.has("hide")) hiddenCols.value = p.get("hide").split(",").filter(Boolean);
+      if (p.get("wrap") === "1") wrapCells.value = true;
+      if (p.get("view") === "data") viewMode.value = "data";
+    });
+  } finally {
+    hashReady = true;
+  }
+}
+
+export function writeHash(hash) {
+  if (!hashReady || typeof window === "undefined") return;
+  try {
+    const { pathname, search } = window.location;
+    const url = `${pathname}${search}${hash ? `#${hash}` : ""}`;
+    if (url !== `${pathname}${search}${window.location.hash}`) {
+      window.history.replaceState(null, "", url);
+    }
+  } catch {
+    // No history API: the view still works, it just is not bookmarkable.
+  }
+}
+
+effect(() => writeHash(hashFor()));
