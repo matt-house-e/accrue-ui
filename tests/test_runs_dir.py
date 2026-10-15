@@ -199,9 +199,10 @@ def test_select_accepts_only_listed_logs(tmp_path: Path):
         traversal = _select(
             client, out / ".." / "out" / ".cache" / "stale" / "run.jsonl"
         )
+        nul = _select(client, "run\x00.jsonl")
         served = client.get("/api/run").json()["log"]["path"]
 
-    for refused in (data_file, dot_dir, outside, traversal):
+    for refused in (data_file, dot_dir, outside, traversal, nul):
         assert refused.status_code == 404
     assert served == str(launch)
 

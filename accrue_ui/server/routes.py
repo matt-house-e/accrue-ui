@@ -167,12 +167,18 @@ async def post_select_run(request: Request) -> dict:
     wanted = body.get("path") if isinstance(body, dict) else None
     if not isinstance(wanted, str) or not wanted:
         raise HTTPException(status_code=400, detail='expected {"path": "<run log>"}')
+    try:
+        target = Path(wanted).resolve()
+    except (ValueError, OSError):
+        # An embedded NUL is a ValueError from lstat: no listed log has one.
+        raise HTTPException(
+            status_code=404, detail=f"no run log {wanted!r} listed"
+        ) from None
     state = request.app.state
     # One switch at a time: two interleaved swaps could leave the follower
     # on one log and the snapshot on another.
     async with state.select_lock:
         listed = await asyncio.to_thread(_list_runs, request)
-        target = Path(wanted).resolve()
         entry = next((r for r in listed if Path(r["path"]).resolve() == target), None)
         if entry is None:
             raise HTTPException(status_code=404, detail=f"no run log {wanted!r} listed")
