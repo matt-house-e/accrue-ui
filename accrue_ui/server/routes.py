@@ -125,11 +125,26 @@ async def get_cell(
     return detail
 
 
+def _list_runs(request: Request) -> list[dict[str, Any]]:
+    """The run logs this server can show: the ``--runs-dir`` tree (else the
+    launch log's siblings), plus the launch log itself wherever it lives."""
+    state = request.app.state
+    return scan_runs(
+        state.runs_dir,
+        served=state.runs,
+        recursive=state.runs_recursive,
+        always=(state.retry.run_path,),
+    )
+
+
 @router.get("/runs")
 async def get_runs(request: Request) -> dict:
-    """Known run logs (siblings of the served log), newest first."""
-    runs: RunLog = request.app.state.runs
-    return {"runs": scan_runs(request.app.state.run_path.parent, served=runs)}
+    """Known run logs, newest first.
+
+    The scan reads the first line of every log it finds, so it runs in a
+    worker thread: a deep ``--runs-dir`` tree must not stall the SSE flush.
+    """
+    return {"runs": await asyncio.to_thread(_list_runs, request)}
 
 
 @router.get("/report")

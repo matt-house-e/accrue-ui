@@ -228,12 +228,15 @@ class RetryController:
         data_spec: str | None = None,
         *,
         prices_path: str | Path | None = None,
+        runs_dir: str | Path | None = None,
     ) -> None:
         self.run_path = Path(run_path)
         self.pipeline_spec = pipeline_spec
         self.data_spec = data_spec
         #: ``--prices`` file, kept only so resume_command reproduces it.
         self.prices_path = prices_path
+        #: ``--runs-dir``, likewise kept only for resume_command.
+        self.runs_dir = runs_dir
         self.last_error: str | None = None
         self._resolved = False
         self._target: _Target | None = None
@@ -279,6 +282,8 @@ class RetryController:
             parts += ["--data", shlex.quote(self.data_spec)]
         if self.prices_path:
             parts += ["--prices", shlex.quote(str(self.prices_path))]
+        if self.runs_dir:
+            parts += ["--runs-dir", shlex.quote(str(self.runs_dir))]
         return " ".join(parts)
 
     def block(self) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 """FastAPI app factory.
 
 ``create_app(run_path, *, token, port=None, allow_origin=None, pipeline=None,
-data=None, prices=None)`` builds the whole read path: security middleware,
+data=None, prices=None, runs_dir=None)`` builds the whole read path: security middleware,
 the API routes, a background follower that keeps the shared RunLog (one
 RunIndex per run in the file) current, a coalescer that flushes SSE deltas
 at most every 100ms, and the static frontend mounted at ``/`` (after the API
@@ -21,6 +21,9 @@ the resolved objects are what ``POST /api/retry`` runs.
 loaded here, eagerly: a bad file raises :class:`PricesError` before the
 server exists, because a run silently priced from the wrong table is worse
 than one that refuses to start.
+
+``runs_dir`` is the CLI's ``--runs-dir``: ``/api/runs`` lists every run log
+under it, recursively, instead of only the served log's siblings.
 
 Binding the server socket to 127.0.0.1 is the runner's job (``cli.py``);
 everything here assumes loopback-only exposure — see ``security.py``.
@@ -117,11 +120,14 @@ def create_app(
     pipeline: str | None = None,
     data: str | None = None,
     prices: str | Path | None = None,
+    runs_dir: str | Path | None = None,
 ) -> FastAPI:
     """Build the accrue-ui server app for one run log."""
     run_path = Path(run_path)
     table = load_prices(prices) if prices is not None else PRICES
-    retry = RetryController(run_path, pipeline, data, prices_path=prices)
+    retry = RetryController(
+        run_path, pipeline, data, prices_path=prices, runs_dir=runs_dir
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -163,6 +169,10 @@ def create_app(
     # reason they failed to import) without running the lifespan.
     app.state.retry = retry
     app.state.prices = table
+    # What /api/runs lists: the --runs-dir tree, else the launch log's
+    # siblings. Fixed at launch, so switching logs never moves the list.
+    app.state.runs_dir = Path(runs_dir) if runs_dir is not None else run_path.parent
+    app.state.runs_recursive = runs_dir is not None
     install_security(app, token=token, port=port, allow_origin=allow_origin)
     app.include_router(router)
     # Static frontend mounts last so /api/* is matched first.

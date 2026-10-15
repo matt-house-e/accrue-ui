@@ -2140,31 +2140,58 @@ def _burst_hint(count: int, first_t: float, last_t: float) -> str | None:
 
 
 def scan_runs(
-    directory: str | Path, served: RunLog | None = None
+    directory: str | Path,
+    served: RunLog | None = None,
+    *,
+    recursive: bool = False,
+    always: tuple[str | Path, ...] = (),
 ) -> list[dict[str, Any]]:
     """List known run logs in *directory*, newest first (for /api/runs).
 
     A log's first record names only its first run. The *served* log may
     hold several (accrue-ui#33), so it is listed under its latest run — the
-    one the header shows — read from the index already in memory.
+    one the header shows — read from the index already in memory, and is
+    the one entry flagged ``served``.
+
+    *recursive* (``--runs-dir``, accrue-ui#38) walks the whole tree, for
+    projects that keep one run per folder — amana's
+    ``out/<run>/<model>/run.jsonl``, where every log has the same stem. Each
+    log is then named by its folder (see :func:`_run_names`), and a file
+    whose first record is not a ``pipeline_start`` is left out: a deep tree
+    holds data ``*.jsonl`` too, and those are not runs. The non-recursive
+    sibling listing keeps listing every ``*.jsonl`` by its stem.
+
+    *always* are logs listed even when the scan would not find them — the
+    launch log, so a server switched away from it can always switch back.
     """
     directory = Path(directory)
-    runs = []
-    if not directory.is_dir():
-        return runs
     served_path = served.path.resolve() if served is not None else None
-    for path in directory.glob("*.jsonl"):
-        # `<run>.prompts.jsonl` capture sidecars live right beside their run
-        # log and match the glob; they are not runs (accrue-ui#27).
-        if is_sidecar(path):
-            continue
+    found: list[Path] = []
+    if directory.is_dir():
+        found = (
+            _walk_logs(directory) if recursive else sorted(directory.glob("*.jsonl"))
+        )
+    # `<run>.prompts.jsonl` capture sidecars live right beside their run
+    # log and match the glob; they are not runs (accrue-ui#27).
+    found = [p for p in found if not is_sidecar(p)]
+    names = _run_names(found, directory) if recursive else {}
+    seen = {p.resolve() for p in found}
+    pinned = {Path(p).resolve() for p in always}
+    for extra in always:
+        extra = Path(extra)
+        if extra.resolve() not in seen and extra.is_file():
+            found.append(extra)
+            seen.add(extra.resolve())
+    runs = []
+    for path in found:
         try:
             st = path.stat()
         except OSError:
             continue
         started_at = None
         run_id = path.stem
-        if served is not None and path.resolve() == served_path:
+        is_served = served is not None and path.resolve() == served_path
+        if is_served:
             latest = served.latest
             run_id = latest.id
             started_at = _iso_utc(latest.started_at) if latest.started_at else None
@@ -2174,6 +2201,8 @@ def scan_runs(
                 run_id = first.get("run_id") or run_id
                 parsed = _parse_iso(first.get("started_at"))
                 started_at = _iso_utc(parsed) if parsed else None
+            elif recursive and path.resolve() not in pinned:
+                continue
         # Live means "being written to right now" — same rule as
         # RunIndex.is_live(), and for the same reason (an interrupted run
         # has no pipeline_end and is not live because of it).
@@ -2182,17 +2211,55 @@ def scan_runs(
         runs.append(
             {
                 "id": run_id,
-                "name": path.stem,
+                "name": names.get(path, path.stem),
                 "path": str(path),
                 "started_at": started_at,
                 "live": live,
-                "_sort": started_at or mtime_iso,
+                "served": is_served,
+                # Same start (a rerun of one config): the fresher file first.
+                "_sort": (started_at or mtime_iso, st.st_mtime),
             }
         )
     runs.sort(key=lambda r: r["_sort"], reverse=True)
     for r in runs:
         del r["_sort"]
     return runs
+
+
+def _walk_logs(root: Path) -> list[Path]:
+    """Every ``*.jsonl`` under *root*, sorted, without following symlinked
+    directories (a link back up the tree would never end) or descending
+    into dot-directories (``.git``, ``.venv``: never runs, often huge)."""
+    logs = []
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        base = Path(folder)
+        logs.extend(base / f for f in sorted(files) if f.endswith(".jsonl"))
+    return logs
+
+
+def _run_names(paths: list[Path], root: Path) -> dict[Path, str]:
+    """Name each log by its folder relative to *root* (accrue-ui#38).
+
+    amana writes ``out/<run>/<model>/run.jsonl``: the stem says nothing and
+    the folder says everything, so ``<run>/<model>`` is the name. A folder
+    holding several logs names each ``<folder>/<stem>`` instead, and a log
+    at the top of *root* has no folder to go by, so it keeps its stem.
+    Names are labels only — a log is always identified by its path.
+    """
+    per_folder: dict[Path, int] = {}
+    for path in paths:
+        per_folder[path.parent] = per_folder.get(path.parent, 0) + 1
+    names = {}
+    for path in paths:
+        folder = path.parent.relative_to(root)
+        if folder == Path("."):
+            names[path] = path.stem
+        elif per_folder[path.parent] == 1:
+            names[path] = folder.as_posix()
+        else:
+            names[path] = (folder / path.stem).as_posix()
+    return names
 
 
 def _read_first_record(path: Path) -> dict[str, Any] | None:

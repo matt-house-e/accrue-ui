@@ -435,3 +435,53 @@ def test_uvicorn_startup_binds_loopback_only(run_log: Path):
         server.should_exit = True
         thread.join(timeout=10)
     assert not thread.is_alive()
+
+
+# ---- --runs-dir (accrue-ui#38) ---------------------------------------------
+
+
+def _amana_out(root: Path) -> tuple[Path, Path]:
+    """Two ``out/<run>/<model>/run.jsonl`` logs; returns (older, newer)."""
+    older = root / "out" / "pass-a" / "model-x" / "run.jsonl"
+    newer = root / "out" / "pass-b" / "model-x" / "run.jsonl"
+    for path in (older, newer):
+        path.parent.mkdir(parents=True)
+        _write_small_log(path)
+    past = time.time() - 3600
+    os.utime(older, (past, past))
+    return older, newer
+
+
+def test_runs_dir_without_a_log_serves_its_newest_run(tmp_path: Path, captured: dict):
+    _, newer = _amana_out(tmp_path)
+    assert cli.main(["--runs-dir", str(tmp_path / "out"), "--no-browser"]) == 0
+    assert captured["log"] == newer
+    assert captured["create_kwargs"]["runs_dir"] == tmp_path / "out"
+
+
+def test_runs_dir_with_a_log_serves_that_log(tmp_path: Path, captured: dict):
+    older, _ = _amana_out(tmp_path)
+    argv = [str(older), "--runs-dir", str(tmp_path / "out"), "--no-browser"]
+    assert cli.main(argv) == 0
+    assert captured["log"] == older
+
+
+def test_runs_dir_reaches_the_resume_command(tmp_path: Path, captured: dict):
+    _amana_out(tmp_path)
+    assert cli.main(["--runs-dir", str(tmp_path / "out"), "--no-browser"]) == 0
+    assert "--runs-dir" in captured["app"].state.retry.resume_command
+
+
+def test_missing_runs_dir_exits_1(tmp_path: Path, captured: dict, capsys):
+    rc = cli.main(["--runs-dir", str(tmp_path / "nope"), "--no-browser"])
+    assert rc == 1
+    assert "--runs-dir" in capsys.readouterr().err
+    assert "app" not in captured
+
+
+def test_runs_dir_holding_no_run_exits_1(tmp_path: Path, captured: dict, capsys):
+    (tmp_path / "out").mkdir()
+    write_log(tmp_path / "out" / "data.jsonl", [{"company": "acme"}])
+    rc = cli.main(["--runs-dir", str(tmp_path / "out"), "--no-browser"])
+    assert rc == 1
+    assert "no run log" in capsys.readouterr().err
