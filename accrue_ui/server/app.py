@@ -53,8 +53,8 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 async def _follow(app: FastAPI) -> None:
     """Feed appended records into the run log; rebuild it on truncation.
 
-    ``POST /api/runs/select`` swaps in another log — ``tail``, ``runs`` and
-    ``run_path`` together, already backfilled. The follower notices between
+    ``POST /api/runs/select`` swaps in another log — ``tail`` and ``runs``
+    together, already backfilled. The follower notices between
     reads, and is the only one to close the tail it was following: a read
     of it may have been in flight in the worker thread when the swap landed.
     """
@@ -165,7 +165,6 @@ def create_app(
         tail, runs = open_log(
             run_path, retry=retry, prices=table, name=_log_name(app, run_path)
         )
-        app.state.run_path = run_path
         app.state.tail = tail
         app.state.runs = runs
         # Clients following the file's latest run; ``run_broadcasters`` holds

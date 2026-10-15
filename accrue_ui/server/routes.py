@@ -155,7 +155,7 @@ async def post_select_run(request: Request) -> dict:
     The path must be one ``/api/runs`` lists — an exact match against a
     fresh scan, so a client can never point the server at any other file
     (404 otherwise). The new log is read off the event loop, then swapped in
-    whole (``tail``, ``runs``, ``run_path``) and marked reset: every SSE
+    whole (``tail`` and ``runs``) and marked reset: every SSE
     client, in every tab, refetches its snapshot. The follower in ``app.py``
     retires the old tail. Retry stays bound to the launch log, so on any
     other log it reports unavailable (see ``RunIndex.retry_block``).
@@ -183,16 +183,15 @@ async def post_select_run(request: Request) -> dict:
         if entry is None:
             raise HTTPException(status_code=404, detail=f"no run log {wanted!r} listed")
         if not entry["served"]:
-            path = Path(entry["path"])
             tail, runs = await asyncio.to_thread(
                 open_log,
-                path,
+                Path(entry["path"]),
                 retry=state.retry,
                 prices=state.prices,
                 name=entry["name"],
             )
             # No await between these: no reader sees half a swap.
-            state.run_path, state.tail, state.runs = path, tail, runs
+            state.tail, state.runs = tail, runs
             runs.mark_reset()
     return {"path": entry["path"], "name": entry["name"]}
 
