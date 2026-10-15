@@ -469,6 +469,8 @@ def test_overview_shows_type_mismatch_and_every_batch_id():
     overview = (STATIC / "views" / "overview.js").read_text()
     css = (STATIC / "style.css").read_text()
     assert "const kinds = f.type_mismatch;" in overview
+    # The accrue 1.5.1 pointer only for the stale-manifest case it explains.
+    assert 'f.type === "str" && kinds.includes("object")' in overview
     assert "<${MismatchChip} f=${f} />" in overview
     assert "<${BatchIds} ids=${o.batch_ids} />" in overview
     assert "ids.map((id) =>" in overview  # every id, none truncated

@@ -100,14 +100,19 @@ function typeClass(f) {
 
 // The values hold kinds the declared type does not allow (server:
 // type_mismatch). Manifests before accrue 1.5.1 (#170) declared a custom
-// schema's nested {value, source} field as "str", so say where the gap is.
+// schema's nested {value, source} field as "str"; only that case blames the
+// manifest. A "12" in an int field is the step's output going astray, and
+// pointing at 1.5.1 there would send the reader to the wrong fix.
 function MismatchChip({ f }) {
   const kinds = f.type_mismatch;
   if (!kinds || kinds.length === 0) return null;
+  const staleManifest = f.type === "str" && kinds.includes("object");
   const tip =
     `Declared ${f.type}, but values are ${kinds.join(" / ")}. ` +
-    "Manifests written before accrue 1.5.1 could declare a custom schema's " +
-    "nested field as str; the values are what the step produced.";
+    (staleManifest
+      ? "Manifests written before accrue 1.5.1 could declare a custom " +
+        "schema's nested field as str; the values are what the step produced."
+      : "The values are what the step produced.");
   return html`<span class="ov-mismatch" data-tip=${tip}
     ><span class="tip-label">≠ ${kinds.join(" / ")}</span></span
   >`;
